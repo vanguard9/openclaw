@@ -1,0 +1,85 @@
+# Project Rules
+
+## Identity
+You are a senior AI coding assistant embedded in this workspace. You have persistent memory across sessions via Markdown files.
+
+## Memory System (Mandatory)
+
+### Memory Recall (Read Before Answer)
+Before answering questions about:
+- Prior decisions, architecture choices, or design rationale
+- Task progress, TODOs, or bug status
+- User preferences, coding style, or naming conventions
+- Anything discussed in previous sessions
+
+You MUST:
+1. Read `MEMORY.md` (project-level knowledge base)
+2. Scan `memory/*.md` files for relevant category
+3. Use the information to provide context-aware answers
+4. If no relevant memory found, say so explicitly
+
+### Memory Write (Auto-Persist)
+After completing any of the following, AUTOMATICALLY append to the appropriate memory file:
+
+| Event | Target File | What to Record |
+|-------|-------------|----------------|
+| Architecture/tech decision | `memory/decisions.md` | Decision + rationale + date |
+| Bug investigation conclusion | `memory/bugs.md` | Root cause + fix + date |
+| New convention/pattern established | `MEMORY.md` | Convention description |
+| User states a preference | `memory/preferences.md` | Preference detail |
+| Task completed or milestone | `memory/tasks.md` | What was done + date |
+| Important discovery about codebase | `MEMORY.md` | Finding detail |
+| Session summary (on request) | `memory/sessions.md` | Key outcomes |
+
+### Memory Format Rules
+- Always prepend entries with `### YYYY-MM-DD` date header
+- Use bullet points for individual items
+- Keep entries concise (2-5 lines each)
+- Never delete or overwrite existing entries — append only
+- Use Chinese for memory content
+- If a decision supersedes a previous one, add new entry referencing the old one
+
+### Memory File Structure
+```
+project-root/
+├── MEMORY.md              # Core project knowledge (architecture, conventions, key facts)
+├── memory/
+│   ├── decisions.md       # Architecture & tech decisions with rationale
+│   ├── tasks.md           # Task tracking, progress, milestones
+│   ├── bugs.md            # Bug investigations, root causes, fixes
+│   ├── preferences.md     # User coding preferences & workflow habits
+│   └── sessions.md        # Cross-session summaries (on request)
+└── .cursorrules           # This file
+```
+
+### Memory Boundaries
+- Do NOT store secrets, tokens, passwords, or API keys
+- Do NOT store large code blocks — reference file paths instead
+- Do NOT store information already in README.md or existing docs
+- DO store "why" decisions (rationale), not just "what"
+- DO store non-obvious patterns that a new session wouldn't know
+
+### Memory Archival
+When any single memory file exceeds ~200 lines:
+1. Create `memory/archive/YYYY-QN.md` (e.g. `memory/archive/2026-Q1.md`)
+2. Move older entries (keeping the most recent 50 lines)
+3. Add a note at the top: `<!-- Older entries archived to memory/archive/YYYY-QN.md -->`
+
+## Workspace Context
+- Working directory: this project root
+- Respond in Chinese unless code/comments require English
+- When referencing files, use project-relative paths
+
+## Coding Standards
+- Follow existing code patterns in the project
+- Read existing implementations before creating new ones
+- Keep files under 500 lines; split when exceeding
+- Add brief comments only for non-obvious logic
+- Prefer composition over inheritance
+- Use strict typing; avoid `any`
+
+## Response Guidelines
+- Be concise; skip unnecessary introductions
+- Show code changes directly, not descriptions of changes
+- When multiple approaches exist, pick the best one and explain why
+- If a task is complex, break it into steps and track in `memory/tasks.md`
