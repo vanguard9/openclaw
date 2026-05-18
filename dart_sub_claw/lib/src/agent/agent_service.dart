@@ -30,6 +30,7 @@ class AgentService {
   Future<AgentTurnResult> runTurn({
     required String message,
     String sessionId = 'default',
+    String? environment,
   }) async {
     final trimmed = message.trim();
     if (trimmed.isEmpty) {
@@ -37,18 +38,55 @@ class AgentService {
     }
 
     final config = await configStore.ensureExists();
-    if (config.provider.kind != 'openai-compatible') {
+    final envConfig = config.resolveEnvironment(environment);
+    if (envConfig.provider.kind != 'openai-compatible') {
       throw UnsupportedError(
           'Only provider.kind=openai-compatible is implemented.');
     }
 
-    final provider = _provider ?? OpenAiCompatibleProvider(config.provider);
+    final provider = _provider ?? OpenAiCompatibleProvider(envConfig.provider);
     final history = await sessionStore.read(sessionId);
     final userMessage = ChatMessage(role: 'user', content: trimmed);
     final messages = [...history, userMessage];
 
     await sessionStore.append(sessionId, userMessage);
     final reply = await provider.complete(messages: messages);
+    await sessionStore.append(
+        sessionId, ChatMessage(role: 'assistant', content: reply));
+
+    return AgentTurnResult(sessionId: sessionId, reply: reply);
+  }
+
+  Future<AgentTurnResult> runTurnStreaming({
+    required String message,
+    required void Function(String delta) onDelta,
+    String sessionId = 'default',
+    String? environment,
+  }) async {
+    final trimmed = message.trim();
+    if (trimmed.isEmpty) {
+      throw ArgumentError('message must not be empty');
+    }
+
+    final config = await configStore.ensureExists();
+    final envConfig = config.resolveEnvironment(environment);
+    if (envConfig.provider.kind != 'openai-compatible') {
+      throw UnsupportedError(
+          'Only provider.kind=openai-compatible is implemented.');
+    }
+
+    final provider = _provider ?? OpenAiCompatibleProvider(envConfig.provider);
+    final history = await sessionStore.read(sessionId);
+    final userMessage = ChatMessage(role: 'user', content: trimmed);
+    final messages = [...history, userMessage];
+
+    await sessionStore.append(sessionId, userMessage);
+    final buffer = StringBuffer();
+    await for (final delta in provider.completeStream(messages: messages)) {
+      buffer.write(delta);
+      onDelta(delta);
+    }
+    final reply = buffer.toString();
     await sessionStore.append(
         sessionId, ChatMessage(role: 'assistant', content: reply));
 

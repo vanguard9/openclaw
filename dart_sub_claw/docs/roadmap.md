@@ -9,9 +9,15 @@ Deliverables:
 - Dart package scaffold.
 - CLI entrypoint.
 - JSON config store.
+- Named environments for test/prod style provider separation.
 - JSONL session store.
 - OpenAI-compatible provider.
+- OpenAI-compatible streaming for TUI output.
 - `agent --message` command.
+- `tui` command using `dart_tui` for terminal chat.
+- TUI input history with Up and Down recall.
+- TUI chat history scrolling with PageUp, PageDown, Ctrl-U, Ctrl-D, Ctrl-G, and mouse wheel.
+- `doctor` command for config, provider, model, port, and session checks.
 - Local gateway with `/health`, `/sessions`, `/agent`, and `/events`.
 - Architecture documentation.
 
@@ -28,6 +34,7 @@ Deliverables:
 
 - Replace ad hoc CLI parsing with a stable parser if command complexity grows.
 - Add a real test dependency and unit tests.
+- Expand TUI smoke coverage beyond input editing and command handling.
 - Add provider response metadata.
 - Add request timeout controls.
 - Add structured logging.

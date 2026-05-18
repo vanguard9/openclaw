@@ -11,6 +11,12 @@ class EchoProvider implements ChatProvider {
   Future<String> complete({required List<ChatMessage> messages}) async {
     return 'echo: ${messages.last.content}';
   }
+
+  @override
+  Stream<String> completeStream({required List<ChatMessage> messages}) async* {
+    yield 'echo: ';
+    yield messages.last.content;
+  }
 }
 
 Future<void> main() async {
@@ -31,6 +37,16 @@ Future<void> main() async {
       messages[0].role != 'user' ||
       messages[1].role != 'assistant') {
     throw StateError('session persistence failed');
+  }
+
+  final deltas = <String>[];
+  final streamResult = await service.runTurnStreaming(
+    message: 'stream',
+    sessionId: 'stream-test',
+    onDelta: deltas.add,
+  );
+  if (streamResult.reply != 'echo: stream' || deltas.join() != 'echo: stream') {
+    throw StateError('streaming agent turn failed');
   }
 
   await temp.delete(recursive: true);

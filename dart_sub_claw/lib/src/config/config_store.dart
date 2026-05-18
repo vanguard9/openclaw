@@ -25,7 +25,9 @@ class ConfigStore {
   Future<void> save(AppConfig config) async {
     await home.create(recursive: true);
     const encoder = JsonEncoder.withIndent('  ');
-    await file.writeAsString('${encoder.convert(config.toJson())}\n');
+    final tempFile = File('${file.path}.tmp');
+    await tempFile.writeAsString('${encoder.convert(config.toJson())}\n');
+    await tempFile.rename(file.path);
   }
 
   Future<AppConfig> ensureExists() async {
@@ -36,14 +38,23 @@ class ConfigStore {
     return config;
   }
 
-  Future<Object?> getValue(String path) async {
+  Future<Object?> getValue(String path, {String? environment}) async {
     final json = (await load()).toJson();
+    final envName = normalizeEnvironmentName(environment);
+    if (envName != null) {
+      return _readPath(json, 'environments.$envName.$path');
+    }
     return _readPath(json, path);
   }
 
-  Future<AppConfig> setValue(String path, String rawValue) async {
+  Future<AppConfig> setValue(
+    String path,
+    String rawValue, {
+    String? environment,
+  }) async {
     final current = await load();
-    final updated = _applySet(current, path, rawValue);
+    final updated =
+        _applySet(current, path, rawValue, environment: environment);
     await save(updated);
     return updated;
   }
@@ -57,7 +68,23 @@ class ConfigStore {
     return cursor;
   }
 
-  AppConfig _applySet(AppConfig config, String path, String rawValue) {
+  AppConfig _applySet(
+    AppConfig config,
+    String path,
+    String rawValue, {
+    String? environment,
+  }) {
+    final envName = normalizeEnvironmentName(environment);
+    if (envName != null) {
+      return config.upsertEnvironment(envName, (current) {
+        final scoped =
+            AppConfig(provider: current.provider, gateway: current.gateway);
+        final updated = _applySet(scoped, path, rawValue);
+        return EnvironmentConfig(
+            provider: updated.provider, gateway: updated.gateway);
+      });
+    }
+
     switch (path) {
       case 'provider.kind':
         return config.copyWith(
@@ -91,11 +118,28 @@ class ConfigStore {
 
 Map<String, Object?> redactConfigForDisplay(AppConfig config) {
   final json = config.toJson();
-  final provider =
-      Map<String, Object?>.from(json['provider'] as Map<String, Object?>);
+  json['provider'] = _redactProvider(json['provider']);
+  final environments = json['environments'];
+  if (environments is Map<String, Object?>) {
+    json['environments'] = environments.map((key, value) {
+      if (value is! Map<String, Object?>) {
+        return MapEntry(key, value);
+      }
+      final env = Map<String, Object?>.from(value);
+      env['provider'] = _redactProvider(env['provider']);
+      return MapEntry(key, env);
+    });
+  }
+  return json;
+}
+
+Object? _redactProvider(Object? value) {
+  if (value is! Map<String, Object?>) {
+    return value;
+  }
+  final provider = Map<String, Object?>.from(value);
   if (provider.containsKey('apiKey')) {
     provider['apiKey'] = '<redacted>';
   }
-  json['provider'] = provider;
-  return json;
+  return provider;
 }

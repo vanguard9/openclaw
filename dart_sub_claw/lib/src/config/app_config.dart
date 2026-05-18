@@ -2,14 +2,82 @@ class AppConfig {
   AppConfig({
     ProviderConfig? provider,
     GatewayConfig? gateway,
+    Map<String, EnvironmentConfig>? environments,
+  })  : provider = provider ?? ProviderConfig(),
+        gateway = gateway ?? GatewayConfig(),
+        environments = Map.unmodifiable(environments ?? const {});
+
+  final ProviderConfig provider;
+  final GatewayConfig gateway;
+  final Map<String, EnvironmentConfig> environments;
+
+  factory AppConfig.fromJson(Map<String, Object?> json) {
+    return AppConfig(
+      provider: ProviderConfig.fromJson(_mapAt(json, 'provider')),
+      gateway: GatewayConfig.fromJson(_mapAt(json, 'gateway')),
+      environments: _environmentsFromJson(_mapAt(json, 'environments')),
+    );
+  }
+
+  Map<String, Object?> toJson() => {
+        'provider': provider.toJson(),
+        'gateway': gateway.toJson(),
+        if (environments.isNotEmpty)
+          'environments': environments.map(
+            (key, value) => MapEntry(key, value.toJson()),
+          ),
+      };
+
+  AppConfig copyWith({
+    ProviderConfig? provider,
+    GatewayConfig? gateway,
+    Map<String, EnvironmentConfig>? environments,
+  }) {
+    return AppConfig(
+      provider: provider ?? this.provider,
+      gateway: gateway ?? this.gateway,
+      environments: environments ?? this.environments,
+    );
+  }
+
+  EnvironmentConfig resolveEnvironment(String? name) {
+    final normalized = normalizeEnvironmentName(name);
+    if (normalized == null) {
+      return EnvironmentConfig(provider: provider, gateway: gateway);
+    }
+    return environments[normalized] ??
+        EnvironmentConfig(provider: provider, gateway: gateway);
+  }
+
+  AppConfig upsertEnvironment(
+    String name,
+    EnvironmentConfig Function(EnvironmentConfig current) update,
+  ) {
+    final normalized = normalizeEnvironmentName(name);
+    if (normalized == null) {
+      throw ArgumentError('Environment name must not be empty.');
+    }
+    final next = Map<String, EnvironmentConfig>.from(environments);
+    next[normalized] = update(
+      next[normalized] ??
+          EnvironmentConfig(provider: provider, gateway: gateway),
+    );
+    return copyWith(environments: next);
+  }
+}
+
+class EnvironmentConfig {
+  EnvironmentConfig({
+    ProviderConfig? provider,
+    GatewayConfig? gateway,
   })  : provider = provider ?? ProviderConfig(),
         gateway = gateway ?? GatewayConfig();
 
   final ProviderConfig provider;
   final GatewayConfig gateway;
 
-  factory AppConfig.fromJson(Map<String, Object?> json) {
-    return AppConfig(
+  factory EnvironmentConfig.fromJson(Map<String, Object?> json) {
+    return EnvironmentConfig(
       provider: ProviderConfig.fromJson(_mapAt(json, 'provider')),
       gateway: GatewayConfig.fromJson(_mapAt(json, 'gateway')),
     );
@@ -20,11 +88,11 @@ class AppConfig {
         'gateway': gateway.toJson(),
       };
 
-  AppConfig copyWith({
+  EnvironmentConfig copyWith({
     ProviderConfig? provider,
     GatewayConfig? gateway,
   }) {
-    return AppConfig(
+    return EnvironmentConfig(
       provider: provider ?? this.provider,
       gateway: gateway ?? this.gateway,
     );
@@ -116,6 +184,28 @@ class GatewayConfig {
 Map<String, Object?> _mapAt(Map<String, Object?> json, String key) {
   final value = json[key];
   return value is Map ? value.cast<String, Object?>() : <String, Object?>{};
+}
+
+Map<String, EnvironmentConfig> _environmentsFromJson(
+    Map<String, Object?> json) {
+  final environments = <String, EnvironmentConfig>{};
+  for (final entry in json.entries) {
+    final key = normalizeEnvironmentName(entry.key);
+    if (key == null || entry.value is! Map) {
+      continue;
+    }
+    environments[key] = EnvironmentConfig.fromJson(
+        (entry.value as Map).cast<String, Object?>());
+  }
+  return environments;
+}
+
+String? normalizeEnvironmentName(String? name) {
+  final normalized = name?.trim().toLowerCase();
+  if (normalized == null || normalized.isEmpty || normalized == 'default') {
+    return null;
+  }
+  return normalized;
 }
 
 String? _stringAt(Map<String, Object?> json, String key) {

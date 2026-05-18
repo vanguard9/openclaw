@@ -11,6 +11,7 @@ class GatewayServer {
     ConfigStore? configStore,
     AgentService? agentService,
     SessionStore? sessionStore,
+    this.environment,
   })  : configStore = configStore ?? ConfigStore(),
         agentService = agentService ?? AgentService(),
         sessionStore = sessionStore ?? SessionStore();
@@ -18,14 +19,18 @@ class GatewayServer {
   final ConfigStore configStore;
   final AgentService agentService;
   final SessionStore sessionStore;
+  final String? environment;
 
   HttpServer? _server;
   final Set<WebSocket> _sockets = {};
 
-  Future<Uri> start({String? host, int? port}) async {
+  Future<Uri> start({String? host, int? port, String? environment}) async {
     final config = await configStore.ensureExists();
-    final bindHost = host ?? config.gateway.host;
-    final bindPort = port ?? config.gateway.port;
+    final envConfig = config.resolveEnvironment(
+      environment ?? this.environment ?? Platform.environment['DARTSUB_ENV'],
+    );
+    final bindHost = host ?? envConfig.gateway.host;
+    final bindPort = port ?? envConfig.gateway.port;
     _server = await HttpServer.bind(bindHost, bindPort);
     _server!.listen(_handleRequest);
     return Uri.parse('http://$bindHost:$bindPort');
@@ -68,9 +73,14 @@ class GatewayServer {
           return;
         }
         final sessionId = payload['sessionId'] as String? ?? 'default';
+        final environment =
+            payload['environment'] as String? ?? this.environment;
         _broadcast({'type': 'agent.started', 'sessionId': sessionId});
-        final result =
-            await agentService.runTurn(message: message, sessionId: sessionId);
+        final result = await agentService.runTurn(
+          message: message,
+          sessionId: sessionId,
+          environment: environment,
+        );
         final response = {'sessionId': result.sessionId, 'reply': result.reply};
         _broadcast({'type': 'agent.completed', ...response});
         await _json(request, response);

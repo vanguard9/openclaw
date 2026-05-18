@@ -8,3 +8,5 @@ environment:
 
 executables:
   dartsub: dart_sub_claw
+dependencies:
+  dart_tui: ^1.2.0

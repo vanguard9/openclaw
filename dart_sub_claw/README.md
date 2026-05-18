@@ -39,10 +39,77 @@ dartsub config set provider.model gpt-4.1-mini
 dartsub config set provider.apiKeyEnv OPENAI_API_KEY
 ```
 
+Set provider config for a named environment:
+
+```sh
+dartsub config --env test set provider.baseUrl https://ark.cn-beijing.volces.com/api/v3
+dartsub config --env test set provider.model glm-4-7-251222
+dartsub config --env test set provider.apiKey <secret>
+```
+
 Show config:
 
 ```sh
 dartsub config list
+```
+
+Run with an environment:
+
+```sh
+dartsub agent --env test --message "hello" --session test
+dartsub gateway run --env test
+```
+
+Start the terminal chat UI:
+
+```sh
+dartsub tui
+dartsub tui --env test --session test
+```
+
+The TUI is built with `dart_tui`. It uses the package Model-Update-View runtime and spinner, while `dartsub` owns input editing compatibility for `Backspace`, `Ctrl-H`, pasted text, and wide-character wrapping. It shows a `思考中` spinner until the first streamed chunk arrives, streams assistant output as chunks arrive from the provider, and then persists the full reply to the session.
+
+TUI keys:
+
+```text
+Up / Down       recall previous inputs for the current session
+Left / Right    move within the input line
+Backspace       delete the previous character
+Ctrl-H          delete the previous character in terminals that emit Ctrl-H
+PageUp/PageDown scroll chat history
+Ctrl-U/Ctrl-D   scroll chat history
+Ctrl-G          jump back to the latest message
+Mouse wheel     scroll chat history
+Ctrl-C          exit the TUI
+```
+
+TUI commands:
+
+```text
+/help
+/status
+/history
+/session <id>
+/env <name|default>
+/clear
+/exit
+```
+
+Run diagnostics:
+
+```sh
+dartsub doctor
+dartsub doctor --env test
+dartsub doctor --skip-model
+```
+
+`doctor` checks config loading, provider fields, API key availability, model connectivity, gateway port availability, and the session directory.
+
+Run the current smoke tests:
+
+```sh
+dart run test/agent_service_test.dart
+dart run test/tui_smoke_test.dart
 ```
 
 ## Gateway API
@@ -67,7 +134,7 @@ Example:
 ```sh
 curl -s http://127.0.0.1:18987/agent \
   -H 'content-type: application/json' \
-  -d '{"message":"hello","sessionId":"default"}'
+  -d '{"message":"hello","sessionId":"default","environment":"test"}'
 ```
 
 ## Runtime Data
