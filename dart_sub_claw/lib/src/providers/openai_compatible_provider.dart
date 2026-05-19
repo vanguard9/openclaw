@@ -16,13 +16,25 @@ class ProviderTimeoutException implements Exception {
   String toString() => message;
 }
 
-class OpenAiCompatibleProvider implements ChatProvider {
+class OpenAiCompatibleProvider implements ChatProvider, DetailedChatProvider {
   OpenAiCompatibleProvider(this.config);
 
   final ProviderConfig config;
 
   @override
   Future<String> complete({
+    required List<ChatMessage> messages,
+    CancellationToken? cancellationToken,
+  }) async {
+    final result = await completeDetailed(
+      messages: messages,
+      cancellationToken: cancellationToken,
+    );
+    return result.content;
+  }
+
+  @override
+  Future<ChatCompletionResult> completeDetailed({
     required List<ChatMessage> messages,
     CancellationToken? cancellationToken,
   }) async {
@@ -59,22 +71,7 @@ class OpenAiCompatibleProvider implements ChatProvider {
             throw _ProviderHttpException(response.statusCode, body, uri);
           }
 
-          final decoded = jsonDecode(body);
-          if (decoded is! Map) {
-            throw FormatException('Provider response must be a JSON object.');
-          }
-          final choices = decoded['choices'];
-          if (choices is List && choices.isNotEmpty) {
-            final first = choices.first;
-            if (first is Map) {
-              final message = first['message'];
-              if (message is Map && message['content'] is String) {
-                return message['content'] as String;
-              }
-            }
-          }
-          throw FormatException(
-              'Provider response did not include choices[0].message.content.');
+          return _parseCompletionResult(jsonDecode(body));
         } finally {
           client.close(force: true);
         }
@@ -159,6 +156,21 @@ class OpenAiCompatibleProvider implements ChatProvider {
     required List<ChatMessage> messages,
     CancellationToken? cancellationToken,
   }) async* {
+    await for (final event in completeStreamDetailed(
+      messages: messages,
+      cancellationToken: cancellationToken,
+    )) {
+      if (event.delta.isNotEmpty) {
+        yield event.delta;
+      }
+    }
+  }
+
+  @override
+  Stream<ChatStreamEvent> completeStreamDetailed({
+    required List<ChatMessage> messages,
+    CancellationToken? cancellationToken,
+  }) async* {
     cancellationToken?.throwIfCancelled();
     final apiKey = _resolveApiKey();
     final uri = _chatCompletionsUri();
@@ -208,11 +220,13 @@ class OpenAiCompatibleProvider implements ChatProvider {
           if (data == '[DONE]') {
             return;
           }
-          final delta = _parseStreamDelta(data);
-          if (delta != null && delta.isNotEmpty) {
+          final event = _parseStreamEvent(data);
+          if (event.delta.isNotEmpty) {
             receivedDelta = true;
             cancellationToken?.throwIfCancelled();
-            yield delta;
+            yield event;
+          } else if (!event.metadata.isEmpty) {
+            yield event;
           }
         }
         return;
@@ -254,24 +268,68 @@ class OpenAiCompatibleProvider implements ChatProvider {
     };
   }
 
-  String? _parseStreamDelta(String data) {
-    final decoded = jsonDecode(data);
+  ChatCompletionResult _parseCompletionResult(Object? decoded) {
     if (decoded is! Map) {
-      return null;
+      throw FormatException('Provider response must be a JSON object.');
     }
     final choices = decoded['choices'];
-    if (choices is! List || choices.isEmpty) {
-      return null;
+    if (choices is List && choices.isNotEmpty) {
+      final first = choices.first;
+      if (first is Map) {
+        final message = first['message'];
+        if (message is Map && message['content'] is String) {
+          return ChatCompletionResult(
+            content: message['content'] as String,
+            metadata: _metadataFromDecoded(decoded, first),
+          );
+        }
+      }
     }
-    final first = choices.first;
-    if (first is! Map) {
-      return null;
+    throw FormatException(
+        'Provider response did not include choices[0].message.content.');
+  }
+
+  ChatStreamEvent _parseStreamEvent(String data) {
+    final decoded = jsonDecode(data);
+    if (decoded is! Map) {
+      return const ChatStreamEvent();
     }
-    final delta = first['delta'];
-    if (delta is Map && delta['content'] is String) {
-      return delta['content'] as String;
+    final choices = decoded['choices'];
+    Map? first;
+    if (choices is List && choices.isNotEmpty && choices.first is Map) {
+      first = choices.first as Map;
     }
-    return null;
+    final delta = first?['delta'];
+    return ChatStreamEvent(
+      delta: delta is Map && delta['content'] is String
+          ? delta['content'] as String
+          : '',
+      metadata: _metadataFromDecoded(decoded, first),
+    );
+  }
+
+  ChatCompletionMetadata _metadataFromDecoded(
+    Map decoded,
+    Map? firstChoice,
+  ) {
+    final raw = <String, Object?>{};
+    for (final key in ['id', 'object', 'created', 'system_fingerprint']) {
+      final value = decoded[key];
+      if (value == null || value is String || value is num || value is bool) {
+        if (value != null) {
+          raw[key] = value as Object;
+        }
+      }
+    }
+    final usage = decoded['usage'];
+    return ChatCompletionMetadata(
+      model: decoded['model'] is String ? decoded['model'] as String : null,
+      finishReason: firstChoice?['finish_reason'] is String
+          ? firstChoice!['finish_reason'] as String
+          : null,
+      usage: usage is Map ? usage.cast<String, Object?>() : const {},
+      raw: raw,
+    );
   }
 
   String _resolveApiKey() {

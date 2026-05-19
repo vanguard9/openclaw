@@ -120,6 +120,8 @@ Supported config keys:
 - `provider.retryBackoffMs`
 - `gateway.host`
 - `gateway.port`
+- `toolPolicy.tools.<tool>`
+- `toolPolicy.sessions.<session>.<tool>`
 
 The default provider kind is `openai-compatible`. The API key can be stored directly for local experiments, but the preferred path is `provider.apiKeyEnv`.
 
@@ -162,7 +164,9 @@ The provider protocol is intentionally text-based for compatibility with any Ope
 
 `AgentService` executes at most four tool steps, then asks the model to continue with the final answer. Tool result messages are only part of the in-memory provider context for that turn; the JSONL session stores the original user message and final assistant reply, not the internal tool call transcript.
 
-`ToolRuntime` defaults to a read-only policy: safe read tools run automatically, and dangerous tools are denied unless the caller provides a permission handler. The TUI provides an interactive handler; `agent` and `gateway` currently do not, so dangerous tools are denied there by default. For confirmed TUI writes, `write_file` accepts paths under the current working directory and the current user's `Downloads` directory.
+`ToolRuntime` defaults to a read-only policy: safe read tools run automatically, and dangerous tools are denied unless the caller provides a permission handler or persisted policy. Persisted policy supports global per-tool decisions and session-scoped overrides under `toolPolicy.tools.<tool>` and `toolPolicy.sessions.<session>.<tool>`, using `ask`, `allow`, or `deny`.
+
+The TUI provides an interactive handler for dangerous tools: `y` allows one call, `a` allows and remembers the tool for the current session, and `n` denies. `agent` and `gateway` do not prompt, so they only run dangerous tools when policy explicitly allows them. For confirmed TUI writes, `write_file` accepts paths under the current working directory and the current user's `Downloads` directory.
 
 File tools reject paths that escape the process working directory. Shell commands are non-interactive, run with a timeout, and return truncated stdout/stderr.
 
@@ -180,13 +184,15 @@ It expects:
 choices[0].message.content
 ```
 
+For detailed callers, provider responses are normalized into `ChatCompletionResult` with optional `ChatCompletionMetadata`. The metadata carries the response `model`, `finishReason`, `usage`, and selected raw top-level provider fields such as `id`, `object`, `created`, and `system_fingerprint`.
+
 For streaming, it sends `stream: true` and parses server-sent event `data:` lines. Deltas are read from:
 
 ```text
 choices[0].delta.content
 ```
 
-The next provider improvement should be a normalized response type that can carry usage and raw provider metadata.
+Streaming detailed callers receive `ChatStreamEvent` values. Delta events carry text chunks, while metadata-only events can update the accumulated metadata for the final turn result.
 
 Provider calls use a bounded runtime policy from config:
 
@@ -217,7 +223,7 @@ The gateway broadcasts coarse lifecycle events:
 - `agent.cancelled`
 - `error`
 
-`POST /agent` remains the simple JSON request-response path. Successful responses include `requestId`, `sessionId`, and `reply`. `POST /agent/stream` returns server-sent events named `started`, `delta`, `completed`, `cancelled`, and `error`. Every `/agent`, `/agent/stream`, and WebSocket lifecycle event for a turn carries the same `requestId`, which gives future UIs and channel adapters a stable key for logs, cancellation controls, retries, and error display.
+`POST /agent` remains the simple JSON request-response path. Successful responses include `requestId`, `sessionId`, `reply`, and `metadata` when the selected provider exposes it. `POST /agent/stream` returns server-sent events named `started`, `delta`, `completed`, `cancelled`, and `error`; completed events also include `metadata` when available. Every `/agent`, `/agent/stream`, and WebSocket lifecycle event for a turn carries the same `requestId`, which gives future UIs and channel adapters a stable key for logs, cancellation controls, retries, and error display.
 
 Gateway errors use top-level `code`, `message`, and `requestId` fields. Current error codes are:
 

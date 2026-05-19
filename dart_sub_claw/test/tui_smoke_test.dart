@@ -253,6 +253,28 @@ set code [lindex $result 3]
 if {$code != 0} { exit $code }
 ''',
     );
+
+    await _runExpect(
+      name: 'tool-permission-remember-session',
+      setup: (home) => _writeProviderConfig(home, toolServer.port),
+      script: r'''
+set timeout 12
+spawn dart run bin/dart_sub_claw.dart tui --session tui-tool-remember-smoke --history 0
+after 1000
+send "use shell\r"
+expect "confirm: allow dangerous tool shell?"
+send "a"
+expect "assistant> tool allowed final"
+after 500
+send "use shell again\r"
+expect "assistant> tool allowed final"
+send "/exit\r"
+expect eof
+catch wait result
+set code [lindex $result 3]
+if {$code != 0} { exit $code }
+''',
+    );
   } finally {
     await toolServer.close(force: true);
   }

@@ -1,20 +1,26 @@
+import '../tools/tool_policy.dart';
+
 class AppConfig {
   AppConfig({
     ProviderConfig? provider,
     GatewayConfig? gateway,
+    ToolPolicyConfig? toolPolicy,
     Map<String, EnvironmentConfig>? environments,
   })  : provider = provider ?? ProviderConfig(),
         gateway = gateway ?? GatewayConfig(),
+        toolPolicy = toolPolicy ?? ToolPolicyConfig(),
         environments = Map.unmodifiable(environments ?? const {});
 
   final ProviderConfig provider;
   final GatewayConfig gateway;
+  final ToolPolicyConfig toolPolicy;
   final Map<String, EnvironmentConfig> environments;
 
   factory AppConfig.fromJson(Map<String, Object?> json) {
     return AppConfig(
       provider: ProviderConfig.fromJson(_mapAt(json, 'provider')),
       gateway: GatewayConfig.fromJson(_mapAt(json, 'gateway')),
+      toolPolicy: ToolPolicyConfig.fromJson(_mapAt(json, 'toolPolicy')),
       environments: _environmentsFromJson(_mapAt(json, 'environments')),
     );
   }
@@ -22,6 +28,7 @@ class AppConfig {
   Map<String, Object?> toJson() => {
         'provider': provider.toJson(),
         'gateway': gateway.toJson(),
+        'toolPolicy': toolPolicy.toJson(),
         if (environments.isNotEmpty)
           'environments': environments.map(
             (key, value) => MapEntry(key, value.toJson()),
@@ -31,11 +38,13 @@ class AppConfig {
   AppConfig copyWith({
     ProviderConfig? provider,
     GatewayConfig? gateway,
+    ToolPolicyConfig? toolPolicy,
     Map<String, EnvironmentConfig>? environments,
   }) {
     return AppConfig(
       provider: provider ?? this.provider,
       gateway: gateway ?? this.gateway,
+      toolPolicy: toolPolicy ?? this.toolPolicy,
       environments: environments ?? this.environments,
     );
   }
@@ -43,10 +52,18 @@ class AppConfig {
   EnvironmentConfig resolveEnvironment(String? name) {
     final normalized = normalizeEnvironmentName(name);
     if (normalized == null) {
-      return EnvironmentConfig(provider: provider, gateway: gateway);
+      return EnvironmentConfig(
+        provider: provider,
+        gateway: gateway,
+        toolPolicy: toolPolicy,
+      );
     }
     return environments[normalized] ??
-        EnvironmentConfig(provider: provider, gateway: gateway);
+        EnvironmentConfig(
+          provider: provider,
+          gateway: gateway,
+          toolPolicy: toolPolicy,
+        );
   }
 
   AppConfig upsertEnvironment(
@@ -60,7 +77,11 @@ class AppConfig {
     final next = Map<String, EnvironmentConfig>.from(environments);
     next[normalized] = update(
       next[normalized] ??
-          EnvironmentConfig(provider: provider, gateway: gateway),
+          EnvironmentConfig(
+            provider: provider,
+            gateway: gateway,
+            toolPolicy: toolPolicy,
+          ),
     );
     return copyWith(environments: next);
   }
@@ -70,32 +91,117 @@ class EnvironmentConfig {
   EnvironmentConfig({
     ProviderConfig? provider,
     GatewayConfig? gateway,
+    ToolPolicyConfig? toolPolicy,
   })  : provider = provider ?? ProviderConfig(),
-        gateway = gateway ?? GatewayConfig();
+        gateway = gateway ?? GatewayConfig(),
+        toolPolicy = toolPolicy ?? ToolPolicyConfig();
 
   final ProviderConfig provider;
   final GatewayConfig gateway;
+  final ToolPolicyConfig toolPolicy;
 
   factory EnvironmentConfig.fromJson(Map<String, Object?> json) {
     return EnvironmentConfig(
       provider: ProviderConfig.fromJson(_mapAt(json, 'provider')),
       gateway: GatewayConfig.fromJson(_mapAt(json, 'gateway')),
+      toolPolicy: ToolPolicyConfig.fromJson(_mapAt(json, 'toolPolicy')),
     );
   }
 
   Map<String, Object?> toJson() => {
         'provider': provider.toJson(),
         'gateway': gateway.toJson(),
+        'toolPolicy': toolPolicy.toJson(),
       };
 
   EnvironmentConfig copyWith({
     ProviderConfig? provider,
     GatewayConfig? gateway,
+    ToolPolicyConfig? toolPolicy,
   }) {
     return EnvironmentConfig(
       provider: provider ?? this.provider,
       gateway: gateway ?? this.gateway,
+      toolPolicy: toolPolicy ?? this.toolPolicy,
     );
+  }
+}
+
+class ToolPolicyConfig {
+  ToolPolicyConfig({
+    Map<String, ToolPolicyDecision>? tools,
+    Map<String, Map<String, ToolPolicyDecision>>? sessions,
+  })  : tools = Map.unmodifiable(
+          tools ?? const <String, ToolPolicyDecision>{},
+        ),
+        sessions = Map.unmodifiable(<String, Map<String, ToolPolicyDecision>>{
+          for (final entry
+              in (sessions ?? const <String, Map<String, ToolPolicyDecision>>{})
+                  .entries)
+            normalizeToolPolicySessionId(entry.key): Map.unmodifiable(
+              Map<String, ToolPolicyDecision>.from(entry.value),
+            ),
+        });
+
+  final Map<String, ToolPolicyDecision> tools;
+  final Map<String, Map<String, ToolPolicyDecision>> sessions;
+
+  factory ToolPolicyConfig.fromJson(Map<String, Object?> json) {
+    return ToolPolicyConfig(
+      tools: _decisionsFromJson(_mapAt(json, 'tools')),
+      sessions: _sessionDecisionsFromJson(_mapAt(json, 'sessions')),
+    );
+  }
+
+  Map<String, Object?> toJson() => {
+        'tools': _decisionsToJson(tools),
+        if (sessions.isNotEmpty)
+          'sessions': sessions.map(
+            (key, value) => MapEntry(key, _decisionsToJson(value)),
+          ),
+      };
+
+  ToolPermissionPolicy toPermissionPolicy() {
+    return ToolPermissionPolicy(tools: tools, sessions: sessions);
+  }
+
+  ToolPolicyConfig withToolDecision(
+    String tool,
+    ToolPolicyDecision decision,
+  ) {
+    _validateKnownTool(tool);
+    return ToolPolicyConfig(
+      tools: {
+        ...tools,
+        tool: decision,
+      },
+      sessions: sessions,
+    );
+  }
+
+  ToolPolicyConfig withSessionToolDecision({
+    required String sessionId,
+    required String tool,
+    required ToolPolicyDecision decision,
+  }) {
+    _validateKnownTool(tool);
+    final normalizedSession = normalizeToolPolicySessionId(sessionId);
+    final sessionPolicy = Map<String, ToolPolicyDecision>.from(
+      sessions[normalizedSession] ?? const {},
+    );
+    sessionPolicy[tool] = decision;
+    return ToolPolicyConfig(
+      tools: tools,
+      sessions: {
+        ...sessions,
+        normalizedSession: sessionPolicy,
+      },
+    );
+  }
+
+  int get explicitDecisionCount {
+    return tools.length +
+        sessions.values.fold<int>(0, (count, policy) => count + policy.length);
   }
 }
 
@@ -216,6 +322,47 @@ Map<String, EnvironmentConfig> _environmentsFromJson(
         (entry.value as Map).cast<String, Object?>());
   }
   return environments;
+}
+
+Map<String, ToolPolicyDecision> _decisionsFromJson(
+  Map<String, Object?> json,
+) {
+  final decisions = <String, ToolPolicyDecision>{};
+  for (final entry in json.entries) {
+    final value = entry.value;
+    if (value is! String) {
+      continue;
+    }
+    decisions[entry.key] = parseToolPolicyDecision(value);
+  }
+  return decisions;
+}
+
+Map<String, Map<String, ToolPolicyDecision>> _sessionDecisionsFromJson(
+  Map<String, Object?> json,
+) {
+  final sessions = <String, Map<String, ToolPolicyDecision>>{};
+  for (final entry in json.entries) {
+    if (entry.value is! Map) {
+      continue;
+    }
+    sessions[entry.key] = _decisionsFromJson(
+      (entry.value as Map).cast<String, Object?>(),
+    );
+  }
+  return sessions;
+}
+
+Map<String, String> _decisionsToJson(
+  Map<String, ToolPolicyDecision> decisions,
+) {
+  return decisions.map((key, value) => MapEntry(key, value.name));
+}
+
+void _validateKnownTool(String tool) {
+  if (!knownToolNames.contains(tool)) {
+    throw ArgumentError('Unsupported tool: $tool');
+  }
 }
 
 String? normalizeEnvironmentName(String? name) {

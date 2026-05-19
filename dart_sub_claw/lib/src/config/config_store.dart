@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../runtime/paths.dart';
+import '../tools/tool_policy.dart';
 import 'app_config.dart';
 
 class ConfigStore {
@@ -59,6 +60,24 @@ class ConfigStore {
     return updated;
   }
 
+  Future<AppConfig> setToolPolicyDecision({
+    required String tool,
+    required ToolPolicyDecision decision,
+    String? sessionId,
+    String? environment,
+  }) async {
+    final current = await load();
+    final updated = _applyToolPolicyDecision(
+      current,
+      tool: tool,
+      decision: decision,
+      sessionId: sessionId,
+      environment: environment,
+    );
+    await save(updated);
+    return updated;
+  }
+
   Object? _readPath(Map<String, Object?> root, String path) {
     Object? cursor = root;
     for (final part in path.split('.')) {
@@ -77,12 +96,37 @@ class ConfigStore {
     final envName = normalizeEnvironmentName(environment);
     if (envName != null) {
       return config.upsertEnvironment(envName, (current) {
-        final scoped =
-            AppConfig(provider: current.provider, gateway: current.gateway);
+        final scoped = AppConfig(
+          provider: current.provider,
+          gateway: current.gateway,
+          toolPolicy: current.toolPolicy,
+        );
         final updated = _applySet(scoped, path, rawValue);
         return EnvironmentConfig(
-            provider: updated.provider, gateway: updated.gateway);
+          provider: updated.provider,
+          gateway: updated.gateway,
+          toolPolicy: updated.toolPolicy,
+        );
       });
+    }
+
+    final parts = path.split('.');
+    if (parts.length == 3 && parts[0] == 'toolPolicy' && parts[1] == 'tools') {
+      return _applyToolPolicyDecision(
+        config,
+        tool: parts[2],
+        decision: parseToolPolicyDecision(rawValue),
+      );
+    }
+    if (parts.length == 4 &&
+        parts[0] == 'toolPolicy' &&
+        parts[1] == 'sessions') {
+      return _applyToolPolicyDecision(
+        config,
+        sessionId: parts[2],
+        tool: parts[3],
+        decision: parseToolPolicyDecision(rawValue),
+      );
     }
 
     switch (path) {
@@ -143,6 +187,36 @@ class ConfigStore {
       throw FormatException('$path must be an integer >= $min.');
     }
     return value;
+  }
+
+  AppConfig _applyToolPolicyDecision(
+    AppConfig config, {
+    required String tool,
+    required ToolPolicyDecision decision,
+    String? sessionId,
+    String? environment,
+  }) {
+    final envName = normalizeEnvironmentName(environment);
+    if (envName != null) {
+      return config.upsertEnvironment(envName, (current) {
+        final nextPolicy = sessionId == null
+            ? current.toolPolicy.withToolDecision(tool, decision)
+            : current.toolPolicy.withSessionToolDecision(
+                sessionId: sessionId,
+                tool: tool,
+                decision: decision,
+              );
+        return current.copyWith(toolPolicy: nextPolicy);
+      });
+    }
+    final nextPolicy = sessionId == null
+        ? config.toolPolicy.withToolDecision(tool, decision)
+        : config.toolPolicy.withSessionToolDecision(
+            sessionId: sessionId,
+            tool: tool,
+            decision: decision,
+          );
+    return config.copyWith(toolPolicy: nextPolicy);
   }
 }
 

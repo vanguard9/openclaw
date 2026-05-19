@@ -11,18 +11,32 @@ import 'package:dart_sub_claw/src/providers/openai_compatible_provider.dart';
 import 'package:dart_sub_claw/src/sessions/chat_message.dart';
 import 'package:dart_sub_claw/src/sessions/session_store.dart';
 
-class StreamingProvider implements ChatProvider {
-  StreamingProvider(this.deltas);
+class StreamingProvider implements ChatProvider, DetailedChatProvider {
+  StreamingProvider(this.deltas,
+      {this.metadata = ChatCompletionMetadata.empty});
 
   final List<String> deltas;
+  final ChatCompletionMetadata metadata;
 
   @override
   Future<String> complete({
     required List<ChatMessage> messages,
     CancellationToken? cancellationToken,
   }) async {
+    return (await completeDetailed(
+      messages: messages,
+      cancellationToken: cancellationToken,
+    ))
+        .content;
+  }
+
+  @override
+  Future<ChatCompletionResult> completeDetailed({
+    required List<ChatMessage> messages,
+    CancellationToken? cancellationToken,
+  }) async {
     cancellationToken?.throwIfCancelled();
-    return deltas.join();
+    return ChatCompletionResult(content: deltas.join(), metadata: metadata);
   }
 
   @override
@@ -30,9 +44,27 @@ class StreamingProvider implements ChatProvider {
     required List<ChatMessage> messages,
     CancellationToken? cancellationToken,
   }) async* {
+    await for (final event in completeStreamDetailed(
+      messages: messages,
+      cancellationToken: cancellationToken,
+    )) {
+      if (event.delta.isNotEmpty) {
+        yield event.delta;
+      }
+    }
+  }
+
+  @override
+  Stream<ChatStreamEvent> completeStreamDetailed({
+    required List<ChatMessage> messages,
+    CancellationToken? cancellationToken,
+  }) async* {
     for (final delta in deltas) {
       cancellationToken?.throwIfCancelled();
-      yield delta;
+      yield ChatStreamEvent(delta: delta);
+    }
+    if (!metadata.isEmpty) {
+      yield ChatStreamEvent(metadata: metadata);
     }
   }
 }
@@ -124,7 +156,14 @@ Future<void> _testJsonAgentRequestIdsAndValidationErrors() async {
     agentService: AgentService(
       configStore: configStore,
       sessionStore: sessionStore,
-      provider: StreamingProvider(['json reply']),
+      provider: StreamingProvider(
+        ['json reply'],
+        metadata: const ChatCompletionMetadata(
+          model: 'gateway-model',
+          finishReason: 'stop',
+          usage: {'total_tokens': 8},
+        ),
+      ),
     ),
   );
   final uri = await server.start(host: '127.0.0.1', port: 0);
@@ -165,6 +204,13 @@ Future<void> _testJsonAgentRequestIdsAndValidationErrors() async {
     if (body['reply'] != 'json reply' || body['sessionId'] != 'gateway-json') {
       throw StateError('unexpected /agent response: $body');
     }
+    final metadata = body['metadata'];
+    if (metadata is! Map ||
+        metadata['model'] != 'gateway-model' ||
+        metadata['finishReason'] != 'stop' ||
+        (metadata['usage'] as Map?)?['total_tokens'] != 8) {
+      throw StateError('unexpected /agent metadata: $body');
+    }
 
     await completedBroadcast.future.timeout(const Duration(seconds: 5));
     final started = broadcasts.firstWhere(
@@ -178,6 +224,11 @@ Future<void> _testJsonAgentRequestIdsAndValidationErrors() async {
     if (started['requestId'] != requestId ||
         completed['requestId'] != requestId) {
       throw StateError('broadcast requestId mismatch: $broadcasts');
+    }
+    final completedMetadata = completed['metadata'];
+    if (completedMetadata is! Map ||
+        completedMetadata['model'] != 'gateway-model') {
+      throw StateError('broadcast metadata missing: $completed');
     }
 
     final invalid = await client.postUrl(uri.resolve('/agent'));
@@ -343,7 +394,14 @@ Future<void> _testSseStreamCompletes() async {
     agentService: AgentService(
       configStore: configStore,
       sessionStore: sessionStore,
-      provider: StreamingProvider(['hello', ' ', 'world']),
+      provider: StreamingProvider(
+        ['hello', ' ', 'world'],
+        metadata: const ChatCompletionMetadata(
+          model: 'stream-gateway-model',
+          finishReason: 'stop',
+          usage: {'total_tokens': 10},
+        ),
+      ),
     ),
   );
   final uri = await server.start(host: '127.0.0.1', port: 0);
@@ -384,6 +442,13 @@ Future<void> _testSseStreamCompletes() async {
     if (completed['reply'] != 'hello world' ||
         completed['sessionId'] != 'gateway-stream') {
       throw StateError('unexpected completed event: $completed');
+    }
+    final completedMetadata = completed['metadata'];
+    if (completedMetadata is! Map ||
+        completedMetadata['model'] != 'stream-gateway-model' ||
+        completedMetadata['finishReason'] != 'stop' ||
+        (completedMetadata['usage'] as Map?)?['total_tokens'] != 10) {
+      throw StateError('unexpected completed metadata: $completed');
     }
 
     final messages = await sessionStore.read('gateway-stream');

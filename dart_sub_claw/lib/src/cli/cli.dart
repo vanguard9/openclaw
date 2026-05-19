@@ -210,5 +210,7 @@ Useful config keys:
   provider.retryBackoffMs
   gateway.host
   gateway.port
+  toolPolicy.tools.<tool>                  ask | allow | deny
+  toolPolicy.sessions.<session>.<tool>     ask | allow | deny
 ''');
 }

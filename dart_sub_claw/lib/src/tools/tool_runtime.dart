@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'tool_policy.dart';
+
 const int defaultMaxToolSteps = 4;
 const int defaultShellTimeoutSeconds = 30;
 const int defaultToolOutputLimit = 12000;
@@ -188,7 +190,11 @@ Do not include any other text before or after the tool_call wrapper. Use at most
     );
   }
 
-  Future<ToolResult> run(ToolCall call) async {
+  Future<ToolResult> run(
+    ToolCall call, {
+    ToolPermissionPolicy? policy,
+    String? sessionId,
+  }) async {
     try {
       final risk = _riskFor(call.tool);
       if (risk == null) {
@@ -199,7 +205,12 @@ Do not include any other text before or after the tool_call wrapper. Use at most
           code: 'unknown_tool',
         );
       }
-      final permission = await _permissionFor(call, risk);
+      final permission = await _permissionFor(
+        call,
+        risk,
+        policy ?? ToolPermissionPolicy.empty,
+        sessionId,
+      );
       if (permission != ToolPermissionDecision.allow) {
         return ToolResult(
           tool: call.tool,
@@ -231,7 +242,19 @@ Do not include any other text before or after the tool_call wrapper. Use at most
   Future<ToolPermissionDecision> _permissionFor(
     ToolCall call,
     ToolRisk risk,
+    ToolPermissionPolicy policy,
+    String? sessionId,
   ) async {
+    final policyDecision = policy.decisionFor(
+      tool: call.tool,
+      sessionId: sessionId,
+    );
+    if (policyDecision == ToolPolicyDecision.allow) {
+      return ToolPermissionDecision.allow;
+    }
+    if (policyDecision == ToolPolicyDecision.deny) {
+      return ToolPermissionDecision.deny;
+    }
     if (risk == ToolRisk.safeRead) {
       return ToolPermissionDecision.allow;
     }

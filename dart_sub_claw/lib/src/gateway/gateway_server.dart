@@ -123,6 +123,7 @@ class GatewayServer {
           'requestId': requestId,
           'sessionId': result.sessionId,
           'reply': result.reply,
+          if (!result.metadata.isEmpty) 'metadata': result.metadata.toJson(),
         };
         _broadcast({'type': 'agent.completed', ...response});
         await _json(request, response);
@@ -304,6 +305,7 @@ class GatewayServer {
         'requestId': requestId,
         'sessionId': result.sessionId,
         'reply': result.reply,
+        if (!result.metadata.isEmpty) 'metadata': result.metadata.toJson(),
       };
       _broadcast({'type': 'agent.completed', ...completed});
       await sendEvent('completed', completed);

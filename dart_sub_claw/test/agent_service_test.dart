@@ -2,10 +2,12 @@ import 'dart:io';
 
 import 'package:dart_sub_claw/src/agent/cancellation.dart';
 import 'package:dart_sub_claw/src/agent/agent_service.dart';
+import 'package:dart_sub_claw/src/config/app_config.dart';
 import 'package:dart_sub_claw/src/config/config_store.dart';
 import 'package:dart_sub_claw/src/providers/chat_provider.dart';
 import 'package:dart_sub_claw/src/sessions/chat_message.dart';
 import 'package:dart_sub_claw/src/sessions/session_store.dart';
+import 'package:dart_sub_claw/src/tools/tool_policy.dart';
 import 'package:dart_sub_claw/src/tools/tool_runtime.dart';
 
 class EchoProvider implements ChatProvider {
@@ -86,6 +88,64 @@ class ScriptedProvider implements ChatProvider {
   }
 }
 
+class MetadataProvider implements ChatProvider, DetailedChatProvider {
+  @override
+  Future<String> complete({
+    required List<ChatMessage> messages,
+    CancellationToken? cancellationToken,
+  }) async {
+    return (await completeDetailed(
+      messages: messages,
+      cancellationToken: cancellationToken,
+    ))
+        .content;
+  }
+
+  @override
+  Future<ChatCompletionResult> completeDetailed({
+    required List<ChatMessage> messages,
+    CancellationToken? cancellationToken,
+  }) async {
+    return const ChatCompletionResult(
+      content: 'metadata reply',
+      metadata: ChatCompletionMetadata(
+        model: 'metadata-model',
+        finishReason: 'stop',
+        usage: {'total_tokens': 9},
+      ),
+    );
+  }
+
+  @override
+  Stream<String> completeStream({
+    required List<ChatMessage> messages,
+    CancellationToken? cancellationToken,
+  }) {
+    return completeStreamDetailed(
+      messages: messages,
+      cancellationToken: cancellationToken,
+    ).map((event) => event.delta).where((delta) => delta.isNotEmpty);
+  }
+
+  @override
+  Stream<ChatStreamEvent> completeStreamDetailed({
+    required List<ChatMessage> messages,
+    CancellationToken? cancellationToken,
+  }) async* {
+    yield const ChatStreamEvent(
+      delta: 'metadata ',
+      metadata: ChatCompletionMetadata(model: 'stream-model'),
+    );
+    yield const ChatStreamEvent(
+      delta: 'stream',
+      metadata: ChatCompletionMetadata(
+        finishReason: 'stop',
+        usage: {'total_tokens': 11},
+      ),
+    );
+  }
+}
+
 Future<void> main() async {
   final temp = await Directory.systemTemp.createTemp('dart_sub_claw_test_');
   final service = AgentService(
@@ -114,6 +174,35 @@ Future<void> main() async {
   );
   if (streamResult.reply != 'echo: stream' || deltas.join() != 'echo: stream') {
     throw StateError('streaming agent turn failed');
+  }
+
+  final metadataService = AgentService(
+    configStore: ConfigStore(home: temp),
+    sessionStore: SessionStore(home: temp),
+    provider: MetadataProvider(),
+  );
+  final metadataResult = await metadataService.runTurn(
+    message: 'metadata',
+    sessionId: 'metadata-test',
+  );
+  if (metadataResult.reply != 'metadata reply' ||
+      metadataResult.metadata.model != 'metadata-model' ||
+      metadataResult.metadata.finishReason != 'stop' ||
+      metadataResult.metadata.usage['total_tokens'] != 9) {
+    throw StateError('metadata result was not preserved');
+  }
+  final metadataDeltas = <String>[];
+  final metadataStreamResult = await metadataService.runTurnStreaming(
+    message: 'metadata stream',
+    sessionId: 'metadata-stream-test',
+    onDelta: metadataDeltas.add,
+  );
+  if (metadataStreamResult.reply != 'metadata stream' ||
+      metadataDeltas.join() != 'metadata stream' ||
+      metadataStreamResult.metadata.model != 'stream-model' ||
+      metadataStreamResult.metadata.finishReason != 'stop' ||
+      metadataStreamResult.metadata.usage['total_tokens'] != 11) {
+    throw StateError('stream metadata result was not preserved');
   }
 
   final cancelTemp =
@@ -211,6 +300,18 @@ Future<void> main() async {
   if (deniedWrite.ok || deniedWrite.code != 'permission_denied') {
     throw StateError('write_file should require permission');
   }
+  final policyDeniedRead = await deniedRuntime.run(
+    ToolCall(
+      tool: 'read_file',
+      arguments: {'path': 'input.txt'},
+    ),
+    policy: ToolPermissionPolicy(
+      tools: {'read_file': ToolPolicyDecision.deny},
+    ),
+  );
+  if (policyDeniedRead.ok || policyDeniedRead.code != 'permission_denied') {
+    throw StateError('tool policy should be able to deny safe reads');
+  }
   final allowedRead = await deniedRuntime.run(ToolCall(
     tool: 'read_file',
     arguments: {'path': 'input.txt'},
@@ -305,6 +406,60 @@ Future<void> main() async {
   if (deniedShellResult.reply != 'shell was denied') {
     throw StateError('denied shell flow failed: ${deniedShellResult.reply}');
   }
+
+  final policyTemp =
+      await Directory.systemTemp.createTemp('dart_sub_claw_policy_test_');
+  final policyConfigStore = ConfigStore(home: policyTemp);
+  final policySessionStore = SessionStore(home: policyTemp);
+  await policyConfigStore.save(AppConfig(
+    provider: ProviderConfig(apiKey: 'test-key'),
+    toolPolicy: ToolPolicyConfig(
+      tools: {'shell': ToolPolicyDecision.deny},
+      sessions: {
+        'remembered': {'shell': ToolPolicyDecision.allow},
+      },
+    ),
+  ));
+  final policyProvider = ScriptedProvider([
+    '<tool_call>{"tool":"shell","arguments":{"command":"printf allowed-by-session"}} </tool_call>',
+    'policy allowed final',
+  ]);
+  final policyService = AgentService(
+    configStore: policyConfigStore,
+    sessionStore: policySessionStore,
+    provider: policyProvider,
+    toolRuntime: ToolRuntime(root: policyTemp),
+  );
+  final policyAllowed = await policyService.runTurn(
+    message: 'try shell',
+    sessionId: 'remembered',
+  );
+  if (policyAllowed.reply != 'policy allowed final' ||
+      policyProvider.index != 2) {
+    throw StateError('session tool policy did not allow shell');
+  }
+  final deniedPolicyProvider = ScriptedProvider([
+    '<tool_call>{"tool":"shell","arguments":{"command":"printf denied-by-policy"}} </tool_call>',
+    'policy denied final',
+  ]);
+  final deniedPolicyService = AgentService(
+    configStore: policyConfigStore,
+    sessionStore: policySessionStore,
+    provider: deniedPolicyProvider,
+    toolRuntime: ToolRuntime(
+      root: policyTemp,
+      permissionHandler: (_) => ToolPermissionDecision.allow,
+    ),
+  );
+  final deniedPolicy = await deniedPolicyService.runTurn(
+    message: 'try shell',
+    sessionId: 'default',
+  );
+  if (deniedPolicy.reply != 'policy denied final' ||
+      deniedPolicyProvider.index != 2) {
+    throw StateError('global tool policy deny flow failed');
+  }
+  await policyTemp.delete(recursive: true);
   await toolTemp.delete(recursive: true);
 
   await temp.delete(recursive: true);

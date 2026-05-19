@@ -6,6 +6,7 @@ import '../providers/chat_provider.dart';
 import '../providers/openai_compatible_provider.dart';
 import '../sessions/chat_message.dart';
 import '../sessions/session_store.dart';
+import '../tools/tool_policy.dart';
 import '../tools/tool_runtime.dart';
 import 'cancellation.dart';
 
@@ -13,10 +14,12 @@ class AgentTurnResult {
   AgentTurnResult({
     required this.sessionId,
     required this.reply,
+    this.metadata = ChatCompletionMetadata.empty,
   });
 
   final String sessionId;
   final String reply;
+  final ChatCompletionMetadata metadata;
 }
 
 class AgentService {
@@ -60,16 +63,22 @@ class AgentService {
 
     cancellationToken?.throwIfCancelled();
     await sessionStore.append(sessionId, userMessage);
-    final reply = await _completeWithTools(
+    final completion = await _completeWithTools(
       provider: provider,
       messages: messages,
+      sessionId: sessionId,
+      toolPolicy: envConfig.toolPolicy.toPermissionPolicy(),
       cancellationToken: cancellationToken,
     );
     cancellationToken?.throwIfCancelled();
     await sessionStore.append(
-        sessionId, ChatMessage(role: 'assistant', content: reply));
+        sessionId, ChatMessage(role: 'assistant', content: completion.content));
 
-    return AgentTurnResult(sessionId: sessionId, reply: reply);
+    return AgentTurnResult(
+      sessionId: sessionId,
+      reply: completion.content,
+      metadata: completion.metadata,
+    );
   }
 
   Future<AgentTurnResult> runTurnStreaming({
@@ -98,17 +107,23 @@ class AgentService {
 
     cancellationToken?.throwIfCancelled();
     await sessionStore.append(sessionId, userMessage);
-    final reply = await _completeStreamingWithTools(
+    final completion = await _completeStreamingWithTools(
       provider: provider,
       messages: messages,
+      sessionId: sessionId,
+      toolPolicy: envConfig.toolPolicy.toPermissionPolicy(),
       cancellationToken: cancellationToken,
       onDelta: onDelta,
     );
     cancellationToken?.throwIfCancelled();
     await sessionStore.append(
-        sessionId, ChatMessage(role: 'assistant', content: reply));
+        sessionId, ChatMessage(role: 'assistant', content: completion.content));
 
-    return AgentTurnResult(sessionId: sessionId, reply: reply);
+    return AgentTurnResult(
+      sessionId: sessionId,
+      reply: completion.content,
+      metadata: completion.metadata,
+    );
   }
 
   List<ChatMessage> _initialMessages(
@@ -122,78 +137,132 @@ class AgentService {
     ];
   }
 
-  Future<String> _completeWithTools({
+  Future<ChatCompletionResult> _completeWithTools({
     required ChatProvider provider,
     required List<ChatMessage> messages,
+    required String sessionId,
+    required ToolPermissionPolicy toolPolicy,
     required CancellationToken? cancellationToken,
   }) async {
     final working = List<ChatMessage>.from(messages);
     for (var step = 0; step <= defaultMaxToolSteps; step += 1) {
       cancellationToken?.throwIfCancelled();
-      final reply = await provider.complete(
+      final completion = await _completeOneMessage(
+        provider: provider,
         messages: working,
         cancellationToken: cancellationToken,
       );
-      final call = toolRuntime.parseToolCall(reply);
+      final call = toolRuntime.parseToolCall(completion.content);
       if (call == null) {
-        return reply;
+        return completion;
       }
       if (step >= defaultMaxToolSteps) {
-        return 'Tool limit reached before a final answer was produced.';
+        return const ChatCompletionResult(
+          content: 'Tool limit reached before a final answer was produced.',
+        );
       }
-      working.add(ChatMessage(role: 'assistant', content: reply));
-      final result = await toolRuntime.run(call);
+      working.add(ChatMessage(role: 'assistant', content: completion.content));
+      final result = await toolRuntime.run(
+        call,
+        policy: toolPolicy,
+        sessionId: sessionId,
+      );
       working.add(_toolResultMessage(result));
     }
-    return 'Tool limit reached before a final answer was produced.';
+    return const ChatCompletionResult(
+      content: 'Tool limit reached before a final answer was produced.',
+    );
   }
 
-  Future<String> _completeStreamingWithTools({
+  Future<ChatCompletionResult> _completeStreamingWithTools({
     required ChatProvider provider,
     required List<ChatMessage> messages,
+    required String sessionId,
+    required ToolPermissionPolicy toolPolicy,
     required CancellationToken? cancellationToken,
     required FutureOr<void> Function(String delta) onDelta,
   }) async {
     final working = List<ChatMessage>.from(messages);
     for (var step = 0; step <= defaultMaxToolSteps; step += 1) {
       cancellationToken?.throwIfCancelled();
-      final reply = await _streamOneAssistantMessage(
+      final completion = await _streamOneAssistantMessage(
         provider: provider,
         messages: working,
         cancellationToken: cancellationToken,
         onDelta: onDelta,
       );
-      final call = toolRuntime.parseToolCall(reply);
+      final call = toolRuntime.parseToolCall(completion.content);
       if (call == null) {
-        return reply;
+        return completion;
       }
       if (step >= defaultMaxToolSteps) {
         const limit = 'Tool limit reached before a final answer was produced.';
         await onDelta(limit);
-        return limit;
+        return const ChatCompletionResult(content: limit);
       }
-      working.add(ChatMessage(role: 'assistant', content: reply));
-      final result = await toolRuntime.run(call);
+      working.add(ChatMessage(role: 'assistant', content: completion.content));
+      final result = await toolRuntime.run(
+        call,
+        policy: toolPolicy,
+        sessionId: sessionId,
+      );
       working.add(_toolResultMessage(result));
     }
     const limit = 'Tool limit reached before a final answer was produced.';
     await onDelta(limit);
-    return limit;
+    return const ChatCompletionResult(content: limit);
   }
 
-  Future<String> _streamOneAssistantMessage({
+  Future<ChatCompletionResult> _completeOneMessage({
+    required ChatProvider provider,
+    required List<ChatMessage> messages,
+    required CancellationToken? cancellationToken,
+  }) async {
+    if (provider is DetailedChatProvider) {
+      final detailed = provider as DetailedChatProvider;
+      return detailed.completeDetailed(
+        messages: messages,
+        cancellationToken: cancellationToken,
+      );
+    }
+    return ChatCompletionResult(
+      content: await provider.complete(
+        messages: messages,
+        cancellationToken: cancellationToken,
+      ),
+    );
+  }
+
+  Future<ChatCompletionResult> _streamOneAssistantMessage({
     required ChatProvider provider,
     required List<ChatMessage> messages,
     required CancellationToken? cancellationToken,
     required FutureOr<void> Function(String delta) onDelta,
   }) async {
     final buffer = StringBuffer();
+    var metadata = ChatCompletionMetadata.empty;
     var flushed = false;
-    await for (final delta in provider.completeStream(
-      messages: messages,
-      cancellationToken: cancellationToken,
-    )) {
+    final detailed = provider is DetailedChatProvider
+        ? provider as DetailedChatProvider
+        : null;
+    final stream = detailed != null
+        ? detailed.completeStreamDetailed(
+            messages: messages,
+            cancellationToken: cancellationToken,
+          )
+        : provider
+            .completeStream(
+              messages: messages,
+              cancellationToken: cancellationToken,
+            )
+            .map((delta) => ChatStreamEvent(delta: delta));
+    await for (final event in stream) {
       cancellationToken?.throwIfCancelled();
+      metadata = metadata.merge(event.metadata);
+      final delta = event.delta;
+      if (delta.isEmpty) {
+        continue;
+      }
       buffer.write(delta);
       if (!flushed && !_couldBeToolCallPrefix(buffer.toString())) {
         flushed = true;
@@ -208,7 +277,7 @@ class AgentService {
     if (!flushed && toolRuntime.parseToolCall(reply) == null) {
       await onDelta(reply);
     }
-    return reply;
+    return ChatCompletionResult(content: reply, metadata: metadata);
   }
 
   bool _couldBeToolCallPrefix(String value) {

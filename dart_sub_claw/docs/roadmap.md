@@ -41,8 +41,8 @@ Deliverables:
 - Replace ad hoc CLI parsing with a stable parser if command complexity grows.
 - Add a real test dependency and unit tests.
 - Expand TUI smoke coverage beyond input editing and command handling.
-- Add provider response metadata.
-- Add persistent tool policy controls, such as per-tool allowlists and session-scoped remember decisions.
+- Provider response metadata. (done)
+- Persistent tool policy controls, such as per-tool allowlists and session-scoped remember decisions. (done)
 - Add structured logging.
 - Add a small `doctor` command for config and provider checks.
 

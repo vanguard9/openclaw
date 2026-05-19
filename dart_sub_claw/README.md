@@ -85,7 +85,16 @@ shell       run a non-interactive shell command
 ```
 
 Tool file paths are restricted to the current working directory. Shell commands run non-interactively with a timeout and truncated output.
-By default, only `read_file` is allowed automatically. `write_file` and `shell` are treated as dangerous tools and require explicit approval. The TUI prompts before running them; non-interactive entrypoints deny them unless a permission handler is provided by the caller. After approval, TUI `write_file` can write under the current working directory and the current user's `Downloads` directory.
+By default, only `read_file` is allowed automatically. `write_file` and `shell` are treated as dangerous tools and require explicit approval. The TUI prompts before running them; `y` allows a single call, `a` allows and remembers that tool for the current session, and `n` denies. Non-interactive entrypoints deny dangerous tools unless a persisted tool policy allows them. After approval, TUI `write_file` can write under the current working directory and the current user's `Downloads` directory.
+
+Persisted tool policy supports global per-tool decisions and session-scoped overrides:
+
+```sh
+dartsub config set toolPolicy.tools.shell deny
+dartsub config set toolPolicy.sessions.default.shell allow
+```
+
+Allowed values are `ask`, `allow`, and `deny`. Session-scoped decisions override global per-tool decisions.
 
 TUI keys:
 
@@ -169,7 +178,7 @@ curl -N http://127.0.0.1:18987/agent/stream \
   -d '{"message":"hello","sessionId":"default","environment":"test"}'
 ```
 
-`/agent` responses include `requestId`, `sessionId`, and `reply`. `/agent/stream` returns server-sent events named `started`, `delta`, `completed`, `cancelled`, and `error`; every event includes the same `requestId` for that turn. If the client disconnects while the model is responding, `dartsub` cancels the provider request and does not save a partial assistant reply.
+`/agent` responses include `requestId`, `sessionId`, `reply`, and optional `metadata` when the selected provider exposes response details. `/agent/stream` returns server-sent events named `started`, `delta`, `completed`, `cancelled`, and `error`; every event includes the same `requestId` for that turn, and `completed` includes optional provider `metadata`. If the client disconnects while the model is responding, `dartsub` cancels the provider request and does not save a partial assistant reply.
 
 Errors use a stable shape:
 

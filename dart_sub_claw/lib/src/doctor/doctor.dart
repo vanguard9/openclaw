@@ -5,6 +5,7 @@ import '../config/config_store.dart';
 import '../providers/openai_compatible_provider.dart';
 import '../sessions/chat_message.dart';
 import '../sessions/session_store.dart';
+import '../tools/tool_policy.dart';
 
 class DoctorOptions {
   DoctorOptions({
@@ -95,6 +96,7 @@ class DartSubDoctor {
     checks.add(_checkEnvironment(config, envName));
     checks.add(_checkProvider(envConfig.provider));
     checks.add(_checkProviderRuntime(envConfig.provider));
+    checks.add(_checkToolPolicy(envConfig.toolPolicy));
     checks.add(_checkApiKey(envConfig.provider));
     checks.add(await _checkGatewayPort(envConfig.gateway));
     checks.add(await _checkSessions());
@@ -191,6 +193,34 @@ class DartSubDoctor {
       name: 'provider runtime',
       message:
           'timeout=${provider.timeoutSeconds}s retries=${provider.maxRetries} backoff=${provider.retryBackoffMs}ms',
+    );
+  }
+
+  DoctorCheck _checkToolPolicy(ToolPolicyConfig policy) {
+    final unknownTools = <String>{
+      ...policy.tools.keys.where((tool) => !knownToolNames.contains(tool)),
+      for (final sessionPolicy in policy.sessions.values)
+        ...sessionPolicy.keys.where((tool) => !knownToolNames.contains(tool)),
+    };
+    if (unknownTools.isNotEmpty) {
+      return DoctorCheck(
+        status: DoctorStatus.warn,
+        name: 'tool policy',
+        message: 'contains unknown tool policies',
+        detail: unknownTools.join(', '),
+      );
+    }
+    if (policy.explicitDecisionCount == 0) {
+      return DoctorCheck(
+        status: DoctorStatus.ok,
+        name: 'tool policy',
+        message: 'default read-only policy',
+      );
+    }
+    return DoctorCheck(
+      status: DoctorStatus.ok,
+      name: 'tool policy',
+      message: '${policy.explicitDecisionCount} explicit decision(s)',
     );
   }
 

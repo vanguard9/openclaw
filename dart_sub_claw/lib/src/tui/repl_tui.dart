@@ -11,6 +11,7 @@ import '../config/app_config.dart';
 import '../config/config_store.dart';
 import '../sessions/chat_message.dart';
 import '../sessions/session_store.dart';
+import '../tools/tool_policy.dart';
 import '../tools/tool_runtime.dart';
 
 const Object _copyUnset = Object();
@@ -66,6 +67,7 @@ class ReplTui {
     await program.run(
       _ChatTuiModel(
         config: config,
+        configStore: configStore,
         sessionStore: sessionStore,
         agentService: service,
         sessionId: sessionId,
@@ -83,6 +85,7 @@ class ReplTui {
 final class _ChatTuiModel extends TeaModel {
   _ChatTuiModel({
     required this.config,
+    required this.configStore,
     required this.sessionStore,
     required this.agentService,
     required this.sessionId,
@@ -116,6 +119,7 @@ final class _ChatTuiModel extends TeaModel {
             );
 
   final AppConfig config;
+  final ConfigStore configStore;
   final SessionStore sessionStore;
   final AgentService agentService;
   final String sessionId;
@@ -140,6 +144,7 @@ final class _ChatTuiModel extends TeaModel {
   final int? lastCtrlCAt;
 
   _ChatTuiModel copyWith({
+    AppConfig? config,
     String? sessionId,
     String? environment,
     bool clearEnvironment = false,
@@ -162,7 +167,8 @@ final class _ChatTuiModel extends TeaModel {
     int? lastCtrlCAt,
   }) {
     return _ChatTuiModel(
-      config: config,
+      config: config ?? this.config,
+      configStore: configStore,
       sessionStore: sessionStore,
       agentService: agentService,
       sessionId: sessionId ?? this.sessionId,
@@ -275,6 +281,24 @@ final class _ChatTuiModel extends TeaModel {
           activeAssistantText: '',
           clearNotice: true,
         ),
+        null,
+      );
+    }
+
+    if (msg is _ToolPolicyRememberedMsg) {
+      return (
+        copyWith(
+          config: msg.config,
+          notice:
+              'remembered allow for ${msg.tool} in session ${msg.sessionId}',
+        ),
+        null,
+      );
+    }
+
+    if (msg is _ToolPolicyRememberFailedMsg) {
+      return (
+        copyWith(notice: 'failed to remember tool policy: ${msg.error}'),
         null,
       );
     }
@@ -433,16 +457,25 @@ final class _ChatTuiModel extends TeaModel {
     if (key == 'y' || text == 'y') {
       return _resolveToolPermission(ToolPermissionDecision.allow);
     }
+    if (key == 'a' || text == 'a') {
+      return _resolveToolPermission(
+        ToolPermissionDecision.allow,
+        rememberForSession: true,
+      );
+    }
     if (key == 'n' || key == 'esc' || text == 'n') {
       return _resolveToolPermission(ToolPermissionDecision.deny);
     }
     return (
-      copyWith(notice: 'press y to allow or n to deny the tool request'),
+      copyWith(notice: 'press y to allow, a to remember, or n to deny'),
       null,
     );
   }
 
-  (Model, Cmd?) _resolveToolPermission(ToolPermissionDecision decision) {
+  (Model, Cmd?) _resolveToolPermission(
+    ToolPermissionDecision decision, {
+    bool rememberForSession = false,
+  }) {
     final pending = pendingToolPermission;
     if (pending == null) {
       return (this, null);
@@ -450,14 +483,20 @@ final class _ChatTuiModel extends TeaModel {
     if (!pending.completer.isCompleted) {
       pending.completer.complete(decision);
     }
+    final rememberCommand =
+        rememberForSession && decision == ToolPermissionDecision.allow
+            ? _rememberToolPolicyCommand(pending.request.tool, sessionId)
+            : null;
     return (
       copyWith(
         pendingToolPermission: null,
-        notice: decision == ToolPermissionDecision.allow
-            ? 'allowed tool ${pending.request.tool}'
-            : 'denied tool ${pending.request.tool}',
+        notice: rememberForSession && decision == ToolPermissionDecision.allow
+            ? 'allowed tool ${pending.request.tool}; remembering...'
+            : decision == ToolPermissionDecision.allow
+                ? 'allowed tool ${pending.request.tool}'
+                : 'denied tool ${pending.request.tool}',
       ),
-      null,
+      rememberCommand,
     );
   }
 
@@ -752,6 +791,22 @@ final class _ChatTuiModel extends TeaModel {
     };
   }
 
+  Cmd _rememberToolPolicyCommand(String tool, String targetSessionId) {
+    return () async {
+      try {
+        final config = await configStore.setToolPolicyDecision(
+          tool: tool,
+          decision: ToolPolicyDecision.allow,
+          sessionId: targetSessionId,
+          environment: environment,
+        );
+        return _ToolPolicyRememberedMsg(config, targetSessionId, tool);
+      } catch (error) {
+        return _ToolPolicyRememberFailedMsg('$error');
+      }
+    };
+  }
+
   @override
   View view() {
     final envConfig = config.resolveEnvironment(environment);
@@ -832,7 +887,7 @@ final class _ChatTuiModel extends TeaModel {
 
 String _permissionPrompt(ToolPermissionRequest request) {
   final args = _oneLine(jsonEncode(request.arguments));
-  return 'confirm: allow dangerous tool ${request.tool}? y/n args=$args';
+  return 'confirm: allow dangerous tool ${request.tool}? y=once a=session n=deny args=$args';
 }
 
 List<Directory> _defaultWritableRoots() {
@@ -1161,6 +1216,20 @@ final class _ToolPermissionPromptMsg extends Msg {
 
   final ToolPermissionRequest request;
   final Completer<ToolPermissionDecision> completer;
+}
+
+final class _ToolPolicyRememberedMsg extends Msg {
+  _ToolPolicyRememberedMsg(this.config, this.sessionId, this.tool);
+
+  final AppConfig config;
+  final String sessionId;
+  final String tool;
+}
+
+final class _ToolPolicyRememberFailedMsg extends Msg {
+  _ToolPolicyRememberFailedMsg(this.error);
+
+  final String error;
 }
 
 final class _PendingToolPermission {
