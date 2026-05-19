@@ -29,7 +29,7 @@ set timeout 8
 spawn dart run bin/dart_sub_claw.dart tui --session tui-backspace-smoke --history 0
 after 1000
 send "/statxx\177\177us\r"
-expect "notice: env=default"
+expect "notice: status:"
 send "/exit\r"
 expect eof
 catch wait result
@@ -45,7 +45,7 @@ set timeout 8
 spawn dart run bin/dart_sub_claw.dart tui --session tui-ctrlh-smoke --history 0
 after 1000
 send "/statxx\b\bus\r"
-expect "notice: env=default"
+expect "notice: status:"
 send "/exit\r"
 expect eof
 catch wait result
@@ -61,11 +61,13 @@ set timeout 8
 spawn dart run bin/dart_sub_claw.dart tui --session tui-history-smoke --history 0
 after 1000
 send "/status\r"
-expect "notice: env=default"
+expect "notice: status:"
+expect "provider: openai-compatible"
+expect "gateway: 127.0.0.1:18987"
 send "\033\[A"
 expect "you> /status"
 send "\033\[B"
-expect "you> 输入消息或 /help"
+expect "you> "
 send "/exit\r"
 expect eof
 catch wait result
@@ -84,7 +86,7 @@ send "draft"
 expect "you> draft"
 send "\003"
 expect "notice: cleared input; press ctrl+c again to exit"
-expect "you> 输入消息或 /help"
+expect "you> "
 send "\003"
 expect eof
 catch wait result
@@ -110,6 +112,46 @@ if {$code != 0} { exit $code }
   );
 
   await _runExpect(
+    name: 'ctrl-d-exits-only-on-empty-input',
+    script: r'''
+set timeout 8
+spawn dart run bin/dart_sub_claw.dart tui --session tui-ctrld-smoke --history 0
+after 1000
+send "draft"
+expect "you> draft"
+send "\004"
+expect "you> draft"
+send "\003"
+expect "notice: cleared input; press ctrl+c again to exit"
+send "\004"
+expect eof
+catch wait result
+set code [lindex $result 3]
+if {$code != 0} { exit $code }
+''',
+  );
+
+  await _runExpect(
+    name: 'ctrl-t-toggle-thinking-display',
+    script: r'''
+set timeout 8
+spawn dart run bin/dart_sub_claw.dart tui --session tui-ctrlt-smoke --history 0
+after 1000
+send "\024"
+expect "notice: thinking display off"
+expect "status=idle | thinking=off"
+send "\024"
+expect "notice: thinking display on"
+expect "status=idle | thinking=on"
+send "/exit\r"
+expect eof
+catch wait result
+set code [lindex $result 3]
+if {$code != 0} { exit $code }
+''',
+  );
+
+  await _runExpect(
     name: 'mouse-wheel-is-ignored',
     script: r'''
 set timeout 8
@@ -121,10 +163,25 @@ send "\033\[<64;10;10M"
 after 500
 send "\033\[<65;10;10M"
 after 500
-send "\033\[Mabc"
-after 500
 send "\b\b\b\b\b"
-expect "you> 输入消息或 /help"
+expect "you> "
+send "/exit\r"
+expect eof
+catch wait result
+set code [lindex $result 3]
+if {$code != 0} { exit $code }
+''',
+  );
+
+  await _runExpect(
+    name: 'mouse-click-keeps-empty-input',
+    script: r'''
+set timeout 8
+spawn dart run bin/dart_sub_claw.dart tui --mouse --session tui-mouse-click-smoke --history 0
+after 1000
+expect "you> "
+send "\033\[<0;10;10M"
+expect "you> "
 send "/exit\r"
 expect eof
 catch wait result
@@ -218,14 +275,25 @@ if {$code != 0} { exit $code }
   try {
     await _runExpect(
       name: 'tool-permission-allow',
-      setup: (home) => _writeProviderConfig(home, toolServer.port),
+      setup: (home) => _writeProviderConfig(
+        home,
+        toolServer.port,
+        allowShellForSession: 'tui-tool-allow-smoke',
+      ),
       script: r'''
 set timeout 12
 spawn dart run bin/dart_sub_claw.dart tui --session tui-tool-allow-smoke --history 0
 after 1000
 send "use shell\r"
-expect "confirm: allow dangerous tool shell?"
+expect "status=需要授权: shell"
+expect "需要用户授权"
+expect "AI 已暂停，正在等待你的授权决定。"
+expect "参数: 已隐藏，按 Ctrl-O 展开详情"
+expect "choice> y 允许一次"
+send "\017"
+expect "printf tui-permission"
 send "y"
+expect "tool> shell completed"
 expect "assistant> tool allowed final"
 send "/exit\r"
 expect eof
@@ -243,8 +311,10 @@ set timeout 12
 spawn dart run bin/dart_sub_claw.dart tui --session tui-tool-deny-smoke --history 0
 after 1000
 send "use shell\r"
-expect "confirm: allow dangerous tool shell?"
+expect "需要用户授权"
+expect "choice> y 允许一次"
 send "n"
+expect "tool> shell denied"
 expect "assistant> tool denied final"
 send "/exit\r"
 expect eof
@@ -262,11 +332,14 @@ set timeout 12
 spawn dart run bin/dart_sub_claw.dart tui --session tui-tool-remember-smoke --history 0
 after 1000
 send "use shell\r"
-expect "confirm: allow dangerous tool shell?"
+expect "需要用户授权"
+expect "choice> y 允许一次"
 send "a"
+expect "tool> shell completed"
 expect "assistant> tool allowed final"
 after 500
 send "use shell again\r"
+expect "tool> shell completed"
 expect "assistant> tool allowed final"
 send "/exit\r"
 expect eof
@@ -381,7 +454,11 @@ Future<void> _writeSlowProviderConfig(Directory home, int port) async {
   await _writeProviderConfig(home, port);
 }
 
-Future<void> _writeProviderConfig(Directory home, int port) async {
+Future<void> _writeProviderConfig(
+  Directory home,
+  int port, {
+  String? allowShellForSession,
+}) async {
   await home.create(recursive: true);
   final file = File('${home.path}${Platform.pathSeparator}config.json');
   await file.writeAsString(
@@ -397,6 +474,14 @@ Future<void> _writeProviderConfig(Directory home, int port) async {
             'host': '127.0.0.1',
             'port': 18987,
           },
+          if (allowShellForSession != null)
+            'toolPolicy': {
+              'sessions': {
+                allowShellForSession: {
+                  'shell': 'allow',
+                },
+              },
+            },
         })}\n',
   );
 }

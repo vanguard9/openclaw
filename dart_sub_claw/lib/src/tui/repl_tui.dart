@@ -16,6 +16,32 @@ import '../tools/tool_runtime.dart';
 
 const Object _copyUnset = Object();
 const int _maxInputHistory = 100;
+const String _inputPlaceholder = '';
+
+enum _ActivityState {
+  idle('idle'),
+  sending('sending'),
+  waiting('waiting'),
+  streaming('streaming'),
+  permissionRequired('permission required'),
+  cancelling('cancelling'),
+  cancelled('cancelled'),
+  error('error');
+
+  const _ActivityState(this.label);
+
+  final String label;
+
+  bool get isActive => switch (this) {
+        _ActivityState.sending ||
+        _ActivityState.waiting ||
+        _ActivityState.streaming ||
+        _ActivityState.permissionRequired ||
+        _ActivityState.cancelling =>
+          true,
+        _ => false,
+      };
+}
 
 class ReplTui {
   ReplTui({
@@ -57,6 +83,7 @@ class ReplTui {
           sessionStore: sessionStore,
           toolRuntime: ToolRuntime(
             writableRoots: _defaultWritableRoots(),
+            requirePermissionForSafeRead: true,
             permissionHandler: (request) {
               final completer = Completer<ToolPermissionDecision>();
               program.send(_ToolPermissionPromptMsg(request, completer));
@@ -105,18 +132,25 @@ final class _ChatTuiModel extends TeaModel {
     this.draftInput = '',
     this.ignoredUnknownSequenceChars = 0,
     this.scrollOffset = 0,
+    this.activity = _ActivityState.idle,
+    this.activityStartedAt,
+    this.placeholderSuppressed = false,
+    this.showThinking = true,
+    this.toolDetailsExpanded = false,
+    Set<String>? sessionAllowedTools,
     this.activeCancellation,
     this.pendingToolPermission,
     this.lastCtrlCAt,
   })  : input = input ??
             TextInputModel(
-              placeholder: '输入消息或 /help',
+              placeholder: _inputPlaceholder,
               charLimit: 4000,
             ),
         spinner = spinner ??
             SpinnerModel(
               prefix: '思考中 ',
-            );
+            ),
+        sessionAllowedTools = Set.unmodifiable(sessionAllowedTools ?? const {});
 
   final AppConfig config;
   final ConfigStore configStore;
@@ -139,6 +173,12 @@ final class _ChatTuiModel extends TeaModel {
   final String draftInput;
   final int ignoredUnknownSequenceChars;
   final int scrollOffset;
+  final _ActivityState activity;
+  final int? activityStartedAt;
+  final bool placeholderSuppressed;
+  final bool showThinking;
+  final bool toolDetailsExpanded;
+  final Set<String> sessionAllowedTools;
   final CancellationController? activeCancellation;
   final _PendingToolPermission? pendingToolPermission;
   final int? lastCtrlCAt;
@@ -162,6 +202,12 @@ final class _ChatTuiModel extends TeaModel {
     String? draftInput,
     int? ignoredUnknownSequenceChars,
     int? scrollOffset,
+    _ActivityState? activity,
+    Object? activityStartedAt = _copyUnset,
+    bool? placeholderSuppressed,
+    bool? showThinking,
+    bool? toolDetailsExpanded,
+    Set<String>? sessionAllowedTools,
     Object? activeCancellation = _copyUnset,
     Object? pendingToolPermission = _copyUnset,
     int? lastCtrlCAt,
@@ -191,6 +237,15 @@ final class _ChatTuiModel extends TeaModel {
       ignoredUnknownSequenceChars:
           ignoredUnknownSequenceChars ?? this.ignoredUnknownSequenceChars,
       scrollOffset: scrollOffset ?? this.scrollOffset,
+      activity: activity ?? this.activity,
+      activityStartedAt: identical(activityStartedAt, _copyUnset)
+          ? this.activityStartedAt
+          : activityStartedAt as int?,
+      placeholderSuppressed:
+          placeholderSuppressed ?? this.placeholderSuppressed,
+      showThinking: showThinking ?? this.showThinking,
+      toolDetailsExpanded: toolDetailsExpanded ?? this.toolDetailsExpanded,
+      sessionAllowedTools: sessionAllowedTools ?? this.sessionAllowedTools,
       activeCancellation: identical(activeCancellation, _copyUnset)
           ? this.activeCancellation
           : activeCancellation as CancellationController?,
@@ -211,6 +266,10 @@ final class _ChatTuiModel extends TeaModel {
       return (copyWith(spinner: nextSpinner as SpinnerModel), cmd);
     }
 
+    if (msg is TickMsg && activity.isActive) {
+      return (copyWith(), null);
+    }
+
     if (msg is WindowSizeMsg) {
       return (
         copyWith(
@@ -223,7 +282,21 @@ final class _ChatTuiModel extends TeaModel {
 
     if (msg is _AgentDeltaMsg) {
       return (
-        copyWith(activeAssistantText: activeAssistantText + msg.delta),
+        copyWith(
+          activeAssistantText: activeAssistantText + msg.delta,
+          activity: _ActivityState.streaming,
+          activityStartedAt: _activityStartedAt(_ActivityState.streaming),
+        ),
+        null,
+      );
+    }
+
+    if (msg is _AgentWaitingMsg) {
+      return (
+        copyWith(
+          activity: _ActivityState.waiting,
+          activityStartedAt: _activityStartedAt(_ActivityState.waiting),
+        ),
         null,
       );
     }
@@ -237,6 +310,8 @@ final class _ChatTuiModel extends TeaModel {
         copyWith(
           messages: _trimLines(nextMessages, historyLimit),
           thinking: false,
+          activity: _ActivityState.idle,
+          activityStartedAt: null,
           activeAssistantText: '',
           clearNotice: true,
           scrollOffset: 0,
@@ -251,6 +326,8 @@ final class _ChatTuiModel extends TeaModel {
       return (
         copyWith(
           thinking: false,
+          activity: _ActivityState.cancelled,
+          activityStartedAt: null,
           activeAssistantText: '',
           notice: 'run cancelled',
           activeCancellation: null,
@@ -264,6 +341,8 @@ final class _ChatTuiModel extends TeaModel {
       return (
         copyWith(
           thinking: false,
+          activity: _ActivityState.error,
+          activityStartedAt: null,
           activeAssistantText: '',
           notice: 'error: ${msg.message}',
           activeCancellation: null,
@@ -278,6 +357,9 @@ final class _ChatTuiModel extends TeaModel {
         copyWith(
           pendingToolPermission:
               _PendingToolPermission(msg.request, msg.completer),
+          activity: _ActivityState.permissionRequired,
+          activityStartedAt:
+              _activityStartedAt(_ActivityState.permissionRequired),
           activeAssistantText: '',
           clearNotice: true,
         ),
@@ -285,20 +367,31 @@ final class _ChatTuiModel extends TeaModel {
       );
     }
 
-    if (msg is _ToolPolicyRememberedMsg) {
+    if (msg is _ToolStartedMsg) {
+      final nextMessages = [
+        ...messages,
+        _ChatLine.tool('${msg.call.tool} running'),
+      ];
       return (
         copyWith(
-          config: msg.config,
-          notice:
-              'remembered allow for ${msg.tool} in session ${msg.sessionId}',
+          messages: _trimLines(nextMessages, historyLimit),
+          activity: _ActivityState.waiting,
+          activityStartedAt: _activityStartedAt(_ActivityState.waiting),
         ),
         null,
       );
     }
 
-    if (msg is _ToolPolicyRememberFailedMsg) {
+    if (msg is _ToolFinishedMsg) {
+      final nextMessages = [
+        ...messages,
+        _ChatLine.tool(_toolResultLine(msg.result)),
+      ];
       return (
-        copyWith(notice: 'failed to remember tool policy: ${msg.error}'),
+        copyWith(
+          messages: _trimLines(nextMessages, historyLimit),
+          activity: thinking ? _ActivityState.waiting : activity,
+        ),
         null,
       );
     }
@@ -313,6 +406,7 @@ final class _ChatTuiModel extends TeaModel {
           draftInput: '',
           ignoredUnknownSequenceChars: 0,
           input: input.copyWith(value: '', cursorPos: 0),
+          placeholderSuppressed: false,
           notice: 'session switched to ${msg.sessionId}',
           scrollOffset: 0,
         ),
@@ -332,19 +426,38 @@ final class _ChatTuiModel extends TeaModel {
       return (copyWith(scrollOffset: _nextScrollOffset(delta)), null);
     }
 
+    if (msg is MouseClickMsg) {
+      return (
+        copyWith(
+          input: input.copyWith(focused: true),
+          placeholderSuppressed: true,
+        ),
+        null,
+      );
+    }
+
     if (msg is MouseMsg) {
       return (this, null);
     }
 
     if (msg is KeyMsg) {
-      if (pendingToolPermission != null) {
-        return _handleToolPermissionKey(msg);
-      }
       if (msg.key == 'ctrl+c') {
         return _handleCtrlC();
       }
       if (msg.key == 'esc') {
         return _handleEscape();
+      }
+      if (msg.key == 'ctrl+d') {
+        return input.value.isEmpty ? (this, _quitCommand(0)) : (this, null);
+      }
+      if (msg.key == 'ctrl+o') {
+        return _toggleToolDetails();
+      }
+      if (msg.key == 'ctrl+t') {
+        return _toggleThinkingDisplay();
+      }
+      if (pendingToolPermission != null) {
+        return _handleToolPermissionKey(msg);
       }
       if (msg.key == 'pgup' || msg.key == 'ctrl+u') {
         return (
@@ -352,7 +465,7 @@ final class _ChatTuiModel extends TeaModel {
           null
         );
       }
-      if (msg.key == 'pgdown' || msg.key == 'ctrl+d') {
+      if (msg.key == 'pgdown') {
         return (
           copyWith(scrollOffset: _nextScrollOffset(-_scrollPageSize)),
           null
@@ -386,7 +499,8 @@ final class _ChatTuiModel extends TeaModel {
 
       return (
         copyWith(
-          input: _updateInput(input, msg),
+          input: _updateInput(input.copyWith(focused: true), msg),
+          placeholderSuppressed: true,
           inputHistoryIndex: null,
           draftInput: '',
           ignoredUnknownSequenceChars: 0,
@@ -400,6 +514,7 @@ final class _ChatTuiModel extends TeaModel {
       return (
         copyWith(
           input: _insertText(input, pasted),
+          placeholderSuppressed: true,
           inputHistoryIndex: null,
           draftInput: '',
           ignoredUnknownSequenceChars: 0,
@@ -417,6 +532,7 @@ final class _ChatTuiModel extends TeaModel {
       return (
         copyWith(
           input: input.copyWith(value: '', cursorPos: 0),
+          placeholderSuppressed: false,
           inputHistoryIndex: null,
           draftInput: '',
           ignoredUnknownSequenceChars: 0,
@@ -446,9 +562,38 @@ final class _ChatTuiModel extends TeaModel {
     }
     if (thinking && activeCancellation != null) {
       activeCancellation!.cancel();
-      return (copyWith(notice: 'cancelling run...'), null);
+      return (
+        copyWith(
+          activity: _ActivityState.cancelling,
+          activityStartedAt: null,
+          notice: 'cancelling run...',
+        ),
+        null,
+      );
     }
     return (copyWith(clearNotice: true), null);
+  }
+
+  (Model, Cmd?) _toggleToolDetails() {
+    final next = !toolDetailsExpanded;
+    return (
+      copyWith(
+        toolDetailsExpanded: next,
+        notice: next ? 'tool details expanded' : 'tool details collapsed',
+      ),
+      null,
+    );
+  }
+
+  (Model, Cmd?) _toggleThinkingDisplay() {
+    final next = !showThinking;
+    return (
+      copyWith(
+        showThinking: next,
+        notice: next ? 'thinking display on' : 'thinking display off',
+      ),
+      null,
+    );
   }
 
   (Model, Cmd?) _handleToolPermissionKey(KeyMsg msg) {
@@ -467,7 +612,7 @@ final class _ChatTuiModel extends TeaModel {
       return _resolveToolPermission(ToolPermissionDecision.deny);
     }
     return (
-      copyWith(notice: 'press y to allow, a to remember, or n to deny'),
+      copyWith(notice: '按 y 允许一次，按 a 本会话允许，按 n 拒绝'),
       null,
     );
   }
@@ -483,20 +628,25 @@ final class _ChatTuiModel extends TeaModel {
     if (!pending.completer.isCompleted) {
       pending.completer.complete(decision);
     }
-    final rememberCommand =
-        rememberForSession && decision == ToolPermissionDecision.allow
-            ? _rememberToolPolicyCommand(pending.request.tool, sessionId)
-            : null;
+    final remember =
+        rememberForSession && decision == ToolPermissionDecision.allow;
+    final nextAllowedTools = remember
+        ? {...sessionAllowedTools, pending.request.tool}
+        : sessionAllowedTools;
     return (
       copyWith(
         pendingToolPermission: null,
-        notice: rememberForSession && decision == ToolPermissionDecision.allow
-            ? 'allowed tool ${pending.request.tool}; remembering...'
+        sessionAllowedTools: nextAllowedTools,
+        activity: thinking ? _ActivityState.waiting : _ActivityState.idle,
+        activityStartedAt:
+            thinking ? _activityStartedAt(_ActivityState.waiting) : null,
+        notice: remember
+            ? 'allowed tool ${pending.request.tool} for this TUI session'
             : decision == ToolPermissionDecision.allow
                 ? 'allowed tool ${pending.request.tool}'
                 : 'denied tool ${pending.request.tool}',
       ),
-      rememberCommand,
+      null,
     );
   }
 
@@ -515,6 +665,7 @@ final class _ChatTuiModel extends TeaModel {
     return (
       copyWith(
         input: nextInput,
+        placeholderSuppressed: true,
         inputHistoryIndex: null,
         draftInput: '',
         ignoredUnknownSequenceChars: 0,
@@ -526,7 +677,7 @@ final class _ChatTuiModel extends TeaModel {
   (Model, Cmd?) _submitInput(TextInputModel sourceInput) {
     final value = sourceInput.value.trim();
     if (value.isEmpty) {
-      return (copyWith(input: sourceInput), null);
+      return (copyWith(input: sourceInput, placeholderSuppressed: true), null);
     }
     final nextInputHistory = _rememberInput(inputHistory, value);
     if (value.startsWith('/')) {
@@ -536,12 +687,14 @@ final class _ChatTuiModel extends TeaModel {
         draftInput: '',
         ignoredUnknownSequenceChars: 0,
         input: sourceInput,
+        placeholderSuppressed: false,
       )._handleSlashCommand(value);
     }
     if (thinking) {
       return (
         copyWith(
           input: sourceInput,
+          placeholderSuppressed: false,
           notice: 'assistant is still responding; use /cancel or Esc',
         ),
         null,
@@ -561,7 +714,10 @@ final class _ChatTuiModel extends TeaModel {
         ignoredUnknownSequenceChars: 0,
         scrollOffset: 0,
         input: sourceInput.copyWith(value: '', cursorPos: 0),
+        placeholderSuppressed: false,
         thinking: true,
+        activity: _ActivityState.sending,
+        activityStartedAt: DateTime.now().millisecondsSinceEpoch,
         activeAssistantText: '',
         activeCancellation: cancellation,
         clearNotice: true,
@@ -582,6 +738,7 @@ final class _ChatTuiModel extends TeaModel {
       input: _inputWithValue(input, inputHistory[nextIndex]),
       inputHistoryIndex: nextIndex,
       draftInput: nextDraft,
+      placeholderSuppressed: true,
       ignoredUnknownSequenceChars: 0,
     );
   }
@@ -610,6 +767,7 @@ final class _ChatTuiModel extends TeaModel {
         input: _inputWithValue(input, draftInput),
         inputHistoryIndex: null,
         draftInput: '',
+        placeholderSuppressed: false,
         ignoredUnknownSequenceChars: 0,
       );
     }
@@ -617,6 +775,7 @@ final class _ChatTuiModel extends TeaModel {
     return copyWith(
       input: _inputWithValue(input, inputHistory[nextIndex]),
       inputHistoryIndex: nextIndex,
+      placeholderSuppressed: true,
       ignoredUnknownSequenceChars: 0,
     );
   }
@@ -637,6 +796,7 @@ final class _ChatTuiModel extends TeaModel {
     final text = chars.sublist(ignoredUnknownSequenceChars).join();
     return copyWith(
       input: _insertText(input, text),
+      placeholderSuppressed: true,
       inputHistoryIndex: null,
       draftInput: '',
       ignoredUnknownSequenceChars: 0,
@@ -653,6 +813,9 @@ final class _ChatTuiModel extends TeaModel {
           return (
             copyWith(
               input: input.copyWith(value: '', cursorPos: 0),
+              placeholderSuppressed: false,
+              activity: _ActivityState.cancelling,
+              activityStartedAt: null,
               notice: 'cancelling run...',
             ),
             null,
@@ -661,6 +824,7 @@ final class _ChatTuiModel extends TeaModel {
         return (
           copyWith(
             input: input.copyWith(value: '', cursorPos: 0),
+            placeholderSuppressed: false,
             notice: 'no active run',
           ),
           null,
@@ -672,6 +836,7 @@ final class _ChatTuiModel extends TeaModel {
         return (
           copyWith(
             input: input.copyWith(value: '', cursorPos: 0),
+            placeholderSuppressed: false,
             notice:
                 'commands: /help /status /history /session <id> /env <name|default> /clear /cancel /exit',
           ),
@@ -681,7 +846,8 @@ final class _ChatTuiModel extends TeaModel {
         return (
           copyWith(
             input: input.copyWith(value: '', cursorPos: 0),
-            notice: _statusLine(),
+            placeholderSuppressed: false,
+            notice: _statusSummary(),
           ),
           null,
         );
@@ -689,6 +855,7 @@ final class _ChatTuiModel extends TeaModel {
         return (
           copyWith(
             input: input.copyWith(value: '', cursorPos: 0),
+            placeholderSuppressed: false,
             notice: '${messages.length} visible message(s)',
           ),
           null,
@@ -697,6 +864,7 @@ final class _ChatTuiModel extends TeaModel {
         return (
           copyWith(
             input: input.copyWith(value: '', cursorPos: 0),
+            placeholderSuppressed: false,
             messages: const [],
             activeAssistantText: '',
             notice: 'screen cleared; session history kept',
@@ -708,6 +876,7 @@ final class _ChatTuiModel extends TeaModel {
           return (
             copyWith(
               input: input.copyWith(value: '', cursorPos: 0),
+              placeholderSuppressed: false,
               notice: 'usage: /session <id>',
             ),
             null,
@@ -715,7 +884,10 @@ final class _ChatTuiModel extends TeaModel {
         }
         final nextSession = parts[1].trim();
         return (
-          copyWith(input: input.copyWith(value: '', cursorPos: 0)),
+          copyWith(
+            input: input.copyWith(value: '', cursorPos: 0),
+            placeholderSuppressed: false,
+          ),
           _loadSessionCommand(nextSession),
         );
       case '/env':
@@ -723,6 +895,7 @@ final class _ChatTuiModel extends TeaModel {
           return (
             copyWith(
               input: input.copyWith(value: '', cursorPos: 0),
+              placeholderSuppressed: false,
               notice: 'usage: /env <name|default>',
             ),
             null,
@@ -732,6 +905,7 @@ final class _ChatTuiModel extends TeaModel {
         return (
           copyWith(
             input: input.copyWith(value: '', cursorPos: 0),
+            placeholderSuppressed: false,
             environment: nextEnv,
             clearEnvironment: nextEnv == null,
             notice: 'environment switched to ${nextEnv ?? 'default'}',
@@ -742,6 +916,7 @@ final class _ChatTuiModel extends TeaModel {
         return (
           copyWith(
             input: input.copyWith(value: '', cursorPos: 0),
+            placeholderSuppressed: false,
             notice: 'unknown command: $command',
           ),
           null,
@@ -761,12 +936,16 @@ final class _ChatTuiModel extends TeaModel {
     CancellationController cancellation,
   ) async {
     try {
+      send(_AgentWaitingMsg());
       final result = await agentService.runTurnStreaming(
         message: value,
         sessionId: sessionId,
         environment: environment,
         cancellationToken: cancellation.token,
         onDelta: (delta) => send(_AgentDeltaMsg(delta)),
+        onToolCall: (call) => send(_ToolStartedMsg(call)),
+        onToolResult: (result) => send(_ToolFinishedMsg(result)),
+        toolPolicyOverride: _interactiveToolPolicy(),
       );
       send(_AgentCompleteMsg(result.reply));
     } on CancelledException {
@@ -791,22 +970,6 @@ final class _ChatTuiModel extends TeaModel {
     };
   }
 
-  Cmd _rememberToolPolicyCommand(String tool, String targetSessionId) {
-    return () async {
-      try {
-        final config = await configStore.setToolPolicyDecision(
-          tool: tool,
-          decision: ToolPolicyDecision.allow,
-          sessionId: targetSessionId,
-          environment: environment,
-        );
-        return _ToolPolicyRememberedMsg(config, targetSessionId, tool);
-      } catch (error) {
-        return _ToolPolicyRememberFailedMsg('$error');
-      }
-    };
-  }
-
   @override
   View view() {
     final envConfig = config.resolveEnvironment(environment);
@@ -817,6 +980,7 @@ final class _ChatTuiModel extends TeaModel {
         'env=${environment ?? 'default'} model=${envConfig.provider.model} session=$sessionId',
         contentWidth,
       ),
+      ..._wrapLine(_activityLine(), contentWidth),
       ..._wrapLine('baseUrl=${envConfig.provider.baseUrl}', contentWidth),
       ..._wrapLine(
         'commands: /help /status /history /session <id> /env <name|default> /clear /cancel /exit',
@@ -838,12 +1002,16 @@ final class _ChatTuiModel extends TeaModel {
 
     lines.add('');
     if (pendingToolPermission != null) {
-      lines.addAll(_wrapLine(
-        _permissionPrompt(pendingToolPermission!.request),
-        contentWidth,
+      lines.addAll(_permissionPanel(
+        pendingToolPermission!.request,
+        contentWidth: contentWidth,
+        expanded: toolDetailsExpanded,
       ));
     }
-    if (thinking && activeAssistantText.isEmpty) {
+    if (showThinking &&
+        thinking &&
+        activeAssistantText.isEmpty &&
+        pendingToolPermission == null) {
       lines.add(spinner.view().content);
     }
     if (notice != null && notice!.isNotEmpty) {
@@ -852,7 +1020,19 @@ final class _ChatTuiModel extends TeaModel {
     if (effectiveScrollOffset > 0) {
       lines.add('scroll: $effectiveScrollOffset line(s) above latest');
     }
-    final inputView = _renderInput(input, contentWidth);
+    final _InputRender inputView;
+    if (pendingToolPermission != null) {
+      inputView = _InputRender(
+        line: 'choice> y 允许一次 | a 本会话允许 | n 拒绝',
+        cursorX: _displayWidth('choice> '),
+      );
+    } else {
+      inputView = _renderInput(
+        input,
+        contentWidth,
+        showPlaceholder: input.value.isEmpty && !placeholderSuppressed,
+      );
+    }
     lines.add(inputView.line);
 
     final view = newView(lines.join('\n'));
@@ -861,9 +1041,56 @@ final class _ChatTuiModel extends TeaModel {
     return view;
   }
 
-  String _statusLine() {
+  String _statusSummary() {
     final envConfig = config.resolveEnvironment(environment);
-    return 'env=${environment ?? 'default'} model=${envConfig.provider.model} session=$sessionId';
+    final provider = envConfig.provider;
+    final gateway = envConfig.gateway;
+    final toolPolicy = envConfig.toolPolicy;
+    final elapsed = _elapsedStatus(activityStartedAt);
+    final activeDetail =
+        elapsed == null ? activity.label : '${activity.label} for $elapsed';
+    final apiKeyConfigured =
+        (provider.apiKey != null && provider.apiKey!.isNotEmpty) ||
+            (Platform.environment[provider.apiKeyEnv]?.isNotEmpty ?? false);
+    final sessionPolicyCount =
+        toolPolicy.sessions[normalizeToolPolicySessionId(sessionId)]?.length ??
+            0;
+    return [
+      'status:',
+      'activity: $activeDetail',
+      'environment: ${environment ?? 'default'}',
+      'session: $sessionId',
+      'messages: ${messages.length} visible',
+      'provider: ${provider.kind} ${provider.model}',
+      'baseUrl: ${provider.baseUrl}',
+      'apiKey: ${apiKeyConfigured ? 'configured' : 'missing'} (${provider.apiKeyEnv})',
+      'gateway: ${gateway.host}:${gateway.port}',
+      'tool policy: ${toolPolicy.explicitDecisionCount} decision(s), $sessionPolicyCount for this session',
+      'interactive permission: ask by default, ${sessionAllowedTools.length} allow(s) for this TUI session',
+      'ui: thinking=${showThinking ? 'on' : 'off'}, toolDetails=${toolDetailsExpanded ? 'expanded' : 'collapsed'}',
+    ].join('\n');
+  }
+
+  ToolPermissionPolicy _interactiveToolPolicy() {
+    final configured = config.resolveEnvironment(environment).toolPolicy;
+    final sessionKey = normalizeToolPolicySessionId(sessionId);
+    final toolDenies = <String, ToolPolicyDecision>{
+      for (final entry in configured.tools.entries)
+        if (entry.value == ToolPolicyDecision.deny) entry.key: entry.value,
+    };
+    final sessionDecisions = <String, ToolPolicyDecision>{
+      for (final entry in (configured.sessions[sessionKey] ?? const {}).entries)
+        if (entry.value == ToolPolicyDecision.deny) entry.key: entry.value,
+      for (final tool in sessionAllowedTools) tool: ToolPolicyDecision.allow,
+    };
+    return ToolPermissionPolicy(
+      tools: toolDenies,
+      sessions: sessionDecisions.isEmpty
+          ? const {}
+          : {
+              sessionKey: sessionDecisions,
+            },
+    );
   }
 
   List<String> _buildBodyLines(int contentWidth) {
@@ -883,11 +1110,91 @@ final class _ChatTuiModel extends TeaModel {
     }
     return bodyLines;
   }
+
+  int? _activityStartedAt(_ActivityState next) {
+    if (!next.isActive) {
+      return null;
+    }
+    if (activity == next && activityStartedAt != null) {
+      return activityStartedAt;
+    }
+    return DateTime.now().millisecondsSinceEpoch;
+  }
+
+  String _activityLine() {
+    final pending = pendingToolPermission;
+    if (pending != null) {
+      return 'status=需要授权: ${pending.request.tool} | y 允许一次 | a 本会话允许 | n 拒绝';
+    }
+    final elapsed = _elapsedStatus(activityStartedAt);
+    final detail =
+        elapsed == null ? activity.label : '${activity.label} • $elapsed';
+    final cancelHint = thinking ? ' | Esc cancels' : '';
+    final thinkingHint = showThinking ? 'thinking=on' : 'thinking=off';
+    return 'status=$detail | $thinkingHint$cancelHint';
+  }
 }
 
-String _permissionPrompt(ToolPermissionRequest request) {
+List<String> _permissionPanel(
+  ToolPermissionRequest request, {
+  required int contentWidth,
+  required bool expanded,
+}) {
   final args = _oneLine(jsonEncode(request.arguments));
-  return 'confirm: allow dangerous tool ${request.tool}? y=once a=session n=deny args=$args';
+  final body = <String>[
+    'AI 已暂停，正在等待你的授权决定。',
+    '工具: ${request.tool}',
+    '风险级别: ${request.risk.name}',
+    if (expanded) '参数: $args' else '参数: 已隐藏，按 Ctrl-O 展开详情',
+    '按 y 允许一次，按 a 本会话允许，按 n 拒绝。',
+  ];
+  return _boxedLines(
+    title: '需要用户授权',
+    lines: body,
+    width: contentWidth,
+  );
+}
+
+String _toolResultLine(ToolResult result) {
+  if (result.code == 'permission_denied') {
+    return '${result.tool} denied';
+  }
+  final status = result.ok ? 'completed' : 'failed';
+  final exit = result.exitCode == null ? '' : ' exit=${result.exitCode}';
+  final output = _oneLine(result.output);
+  if (output.isEmpty) {
+    return '${result.tool} $status$exit';
+  }
+  return '${result.tool} $status$exit: $output';
+}
+
+List<String> _boxedLines({
+  required String title,
+  required List<String> lines,
+  required int width,
+}) {
+  final boxWidth = width.clamp(40, 120).toInt();
+  final innerWidth = (boxWidth - 4).clamp(20, 116).toInt();
+  final output = <String>[
+    '+${'-' * (boxWidth - 2)}+',
+    '| ${_padRightDisplay(title, innerWidth)} |',
+    '+${'-' * (boxWidth - 2)}+',
+  ];
+  for (final line in lines) {
+    for (final wrapped in _wrapLine(line, innerWidth)) {
+      output.add('| ${_padRightDisplay(wrapped, innerWidth)} |');
+    }
+  }
+  output.add('+${'-' * (boxWidth - 2)}+');
+  return output;
+}
+
+String _padRightDisplay(String value, int width) {
+  final displayWidth = _displayWidth(value);
+  if (displayWidth >= width) {
+    return value;
+  }
+  return '$value${' ' * (width - displayWidth)}';
 }
 
 List<Directory> _defaultWritableRoots() {
@@ -1028,13 +1335,20 @@ TextInputModel _moveCursor(TextInputModel input, int delta) {
       cursorPos: _clampCursor(input.cursorPos + delta, length));
 }
 
-_InputRender _renderInput(TextInputModel input, int maxWidth) {
+_InputRender _renderInput(
+  TextInputModel input,
+  int maxWidth, {
+  required bool showPlaceholder,
+}) {
   const prompt = 'you> ';
   final promptWidth = _displayWidth(prompt);
   final availableWidth = (maxWidth - promptWidth).clamp(10, 180);
-  if (input.value.isEmpty) {
+  if (input.value.isEmpty && showPlaceholder) {
     final placeholder = _takeDisplayWidth(input.placeholder, availableWidth);
     return _InputRender(line: '$prompt$placeholder', cursorX: promptWidth);
+  }
+  if (input.value.isEmpty) {
+    return _InputRender(line: prompt, cursorX: promptWidth);
   }
 
   final chars = _charactersOf(input.value);
@@ -1063,10 +1377,24 @@ int _maxBodyLinesForHeight(
   bool thinking,
   String activeAssistantText,
 ) {
-  final reservedLines = 8 +
+  final reservedLines = 9 +
       (notice == null ? 0 : 1) +
       (thinking && activeAssistantText.isEmpty ? 1 : 0);
   return (height - reservedLines).clamp(3, 200).toInt();
+}
+
+String? _elapsedStatus(int? startedAt) {
+  if (startedAt == null) {
+    return null;
+  }
+  final elapsedMs = DateTime.now().millisecondsSinceEpoch - startedAt;
+  final totalSeconds = (elapsedMs ~/ 1000).clamp(0, 1 << 30);
+  if (totalSeconds < 60) {
+    return '${totalSeconds}s';
+  }
+  final minutes = totalSeconds ~/ 60;
+  final seconds = totalSeconds % 60;
+  return '${minutes}m ${seconds}s';
 }
 
 List<String> _wrapLine(String text, int maxWidth) {
@@ -1184,6 +1512,8 @@ final class _ChatLine {
   factory _ChatLine.assistant(String content) =>
       _ChatLine('assistant', content);
 
+  factory _ChatLine.tool(String content) => _ChatLine('tool', content);
+
   final String label;
   final String content;
 }
@@ -1193,9 +1523,21 @@ final class _AgentDeltaMsg extends Msg {
   final String delta;
 }
 
+final class _AgentWaitingMsg extends Msg {}
+
 final class _AgentCompleteMsg extends Msg {
   _AgentCompleteMsg(this.reply);
   final String reply;
+}
+
+final class _ToolStartedMsg extends Msg {
+  _ToolStartedMsg(this.call);
+  final ToolCall call;
+}
+
+final class _ToolFinishedMsg extends Msg {
+  _ToolFinishedMsg(this.result);
+  final ToolResult result;
 }
 
 final class _AgentCancelledMsg extends Msg {}
@@ -1216,20 +1558,6 @@ final class _ToolPermissionPromptMsg extends Msg {
 
   final ToolPermissionRequest request;
   final Completer<ToolPermissionDecision> completer;
-}
-
-final class _ToolPolicyRememberedMsg extends Msg {
-  _ToolPolicyRememberedMsg(this.config, this.sessionId, this.tool);
-
-  final AppConfig config;
-  final String sessionId;
-  final String tool;
-}
-
-final class _ToolPolicyRememberFailedMsg extends Msg {
-  _ToolPolicyRememberFailedMsg(this.error);
-
-  final String error;
 }
 
 final class _PendingToolPermission {

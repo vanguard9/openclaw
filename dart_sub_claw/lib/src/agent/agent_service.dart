@@ -22,6 +22,9 @@ class AgentTurnResult {
   final ChatCompletionMetadata metadata;
 }
 
+typedef AgentToolCallHandler = FutureOr<void> Function(ToolCall call);
+typedef AgentToolResultHandler = FutureOr<void> Function(ToolResult result);
+
 class AgentService {
   AgentService({
     ConfigStore? configStore,
@@ -42,6 +45,7 @@ class AgentService {
     required String message,
     String sessionId = 'default',
     String? environment,
+    ToolPermissionPolicy? toolPolicyOverride,
     CancellationToken? cancellationToken,
   }) async {
     final trimmed = message.trim();
@@ -67,7 +71,8 @@ class AgentService {
       provider: provider,
       messages: messages,
       sessionId: sessionId,
-      toolPolicy: envConfig.toolPolicy.toPermissionPolicy(),
+      toolPolicy:
+          toolPolicyOverride ?? envConfig.toolPolicy.toPermissionPolicy(),
       cancellationToken: cancellationToken,
     );
     cancellationToken?.throwIfCancelled();
@@ -84,8 +89,11 @@ class AgentService {
   Future<AgentTurnResult> runTurnStreaming({
     required String message,
     required FutureOr<void> Function(String delta) onDelta,
+    AgentToolCallHandler? onToolCall,
+    AgentToolResultHandler? onToolResult,
     String sessionId = 'default',
     String? environment,
+    ToolPermissionPolicy? toolPolicyOverride,
     CancellationToken? cancellationToken,
   }) async {
     final trimmed = message.trim();
@@ -111,9 +119,12 @@ class AgentService {
       provider: provider,
       messages: messages,
       sessionId: sessionId,
-      toolPolicy: envConfig.toolPolicy.toPermissionPolicy(),
+      toolPolicy:
+          toolPolicyOverride ?? envConfig.toolPolicy.toPermissionPolicy(),
       cancellationToken: cancellationToken,
       onDelta: onDelta,
+      onToolCall: onToolCall,
+      onToolResult: onToolResult,
     );
     cancellationToken?.throwIfCancelled();
     await sessionStore.append(
@@ -181,6 +192,8 @@ class AgentService {
     required ToolPermissionPolicy toolPolicy,
     required CancellationToken? cancellationToken,
     required FutureOr<void> Function(String delta) onDelta,
+    AgentToolCallHandler? onToolCall,
+    AgentToolResultHandler? onToolResult,
   }) async {
     final working = List<ChatMessage>.from(messages);
     for (var step = 0; step <= defaultMaxToolSteps; step += 1) {
@@ -201,11 +214,13 @@ class AgentService {
         return const ChatCompletionResult(content: limit);
       }
       working.add(ChatMessage(role: 'assistant', content: completion.content));
+      await onToolCall?.call(call);
       final result = await toolRuntime.run(
         call,
         policy: toolPolicy,
         sessionId: sessionId,
       );
+      await onToolResult?.call(result);
       working.add(_toolResultMessage(result));
     }
     const limit = 'Tool limit reached before a final answer was produced.';

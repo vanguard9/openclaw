@@ -89,6 +89,7 @@ class ToolRuntime {
     List<Directory>? writableRoots,
     this.shellTimeoutSeconds = defaultShellTimeoutSeconds,
     this.outputLimit = defaultToolOutputLimit,
+    this.requirePermissionForSafeRead = false,
     this.permissionHandler,
   })  : root = root ?? Directory.current,
         writableRoots = writableRoots ?? const [];
@@ -97,6 +98,7 @@ class ToolRuntime {
   final List<Directory> writableRoots;
   final int shellTimeoutSeconds;
   final int outputLimit;
+  final bool requirePermissionForSafeRead;
   final ToolPermissionHandler? permissionHandler;
 
   List<ToolDefinition> get definitions => const [
@@ -255,7 +257,7 @@ Do not include any other text before or after the tool_call wrapper. Use at most
     if (policyDecision == ToolPolicyDecision.deny) {
       return ToolPermissionDecision.deny;
     }
-    if (risk == ToolRisk.safeRead) {
+    if (risk == ToolRisk.safeRead && !requirePermissionForSafeRead) {
       return ToolPermissionDecision.allow;
     }
     final handler = permissionHandler;

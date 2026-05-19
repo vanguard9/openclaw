@@ -1,39 +1,39 @@
-# dart_sub_claw Architecture
+# dart_sub_claw 架构
 
-## Design Goal
+## 设计目标
 
-`dart_sub_claw` should start as a compact, understandable Dart core rather than a direct port of every OpenClaw subsystem.
-The first implementation keeps the same high-level shape as OpenClaw but chooses smaller contracts:
+`dart_sub_claw` 应该从一个紧凑、易理解的 Dart 核心开始，而不是直接移植 OpenClaw 的每一个子系统。
+第一版实现保留与 OpenClaw 相同的高层形态，但选择更小的契约：
 
-- CLI as the operator surface.
-- Gateway as a local control plane.
-- Agent service as the core message execution path.
-- Tool runtime for controlled local actions.
-- Provider abstraction for model calls.
-- Session store for durable conversation history.
-- Channel abstraction reserved for later messaging integrations.
+- CLI 作为操作员界面。
+- Gateway 作为本地控制平面。
+- Agent service 作为核心消息执行路径。
+- Tool runtime 用于受控的本地操作。
+- Provider abstraction 用于模型调用。
+- Session store 用于持久化会话历史。
+- Channel abstraction 预留给后续消息集成。
 
-## OpenClaw Mapping
+## OpenClaw 映射
 
-| OpenClaw area | Current TypeScript path | Dart MVP equivalent |
-| --- | --- | --- |
-| CLI bootstrap | `src/entry.ts`, `src/cli/program/build-program.ts` | `bin/dart_sub_claw.dart`, executable `dartsub`, `lib/src/cli/cli.dart` |
-| Command registration | `src/cli/program/command-registry.ts` | Small switch-based CLI dispatcher |
-| Agent turn | `src/commands/agent.ts` | `lib/src/agent/agent_service.dart` |
-| Tools | `src/agents/tools/*` | `lib/src/tools/tool_runtime.dart` |
-| Gateway | `src/gateway/server.impl.ts` | `lib/src/gateway/gateway_server.dart` |
-| TUI | `src/cli/tui-cli.ts` | `lib/src/tui/repl_tui.dart` |
-| Doctor | `src/commands/doctor-*.ts` | `lib/src/doctor/doctor.dart` |
-| Provider/model call | `src/agents/*` | `lib/src/providers/*` |
-| Sessions | `src/config/sessions.ts`, `src/commands/agent/session*.ts` | `lib/src/sessions/*` |
-| Channels | `src/channels/*`, `extensions/*` | `lib/src/channels/channel.dart` |
-| Media | `src/media/*` | Not implemented yet |
-| Plugins | `src/plugins/*`, `extensions/*` | Not implemented yet |
+| OpenClaw 区域     | 当前 TypeScript 路径                                       | Dart MVP 对应实现                                                      |
+| ----------------- | ---------------------------------------------------------- | ---------------------------------------------------------------------- |
+| CLI 引导          | `src/entry.ts`, `src/cli/program/build-program.ts`         | `bin/dart_sub_claw.dart`, executable `dartsub`, `lib/src/cli/cli.dart` |
+| 命令注册          | `src/cli/program/command-registry.ts`                      | 小型的基于 switch 的 CLI 分发器                                        |
+| Agent 回合        | `src/commands/agent.ts`                                    | `lib/src/agent/agent_service.dart`                                     |
+| 工具              | `src/agents/tools/*`                                       | `lib/src/tools/tool_runtime.dart`                                      |
+| Gateway           | `src/gateway/server.impl.ts`                               | `lib/src/gateway/gateway_server.dart`                                  |
+| TUI               | `src/cli/tui-cli.ts`                                       | `lib/src/tui/repl_tui.dart`                                            |
+| Doctor            | `src/commands/doctor-*.ts`                                 | `lib/src/doctor/doctor.dart`                                           |
+| Provider/模型调用 | `src/agents/*`                                             | `lib/src/providers/*`                                                  |
+| Sessions          | `src/config/sessions.ts`, `src/commands/agent/session*.ts` | `lib/src/sessions/*`                                                   |
+| Channels          | `src/channels/*`, `extensions/*`                           | `lib/src/channels/channel.dart`                                        |
+| Media             | `src/media/*`                                              | 尚未实现                                                               |
+| Plugins           | `src/plugins/*`, `extensions/*`                            | 尚未实现                                                               |
 
-## Runtime Flow
+## 运行时流程
 
 ```mermaid
-flowchart LR
+graph LR
   CLI["CLI or Gateway API"] --> AgentService["AgentService"]
   AgentService --> ConfigStore["ConfigStore"]
   AgentService --> SessionStore["SessionStore"]
@@ -44,11 +44,11 @@ flowchart LR
   AgentService --> CLI
 ```
 
-## Modules
+## 模块
 
 ### CLI
 
-`lib/src/cli/cli.dart` is deliberately simple. It supports:
+`lib/src/cli/cli.dart` 有意保持简单。它支持：
 
 - `agent --message <text> [--session <id>]`
 - `gateway run [--host <host>] [--port <port>]`
@@ -58,13 +58,13 @@ flowchart LR
 - `config get <key>`
 - `config set <key> <value>`
 
-This avoids committing early to a third-party argument parser. If command complexity grows, the CLI layer can be replaced without changing the core services.
+这样可以避免过早绑定到第三方参数解析器。如果命令复杂度增长，CLI 层可以被替换，而不需要改变核心服务。
 
 ### TUI
 
-`lib/src/tui/repl_tui.dart` is a `dart_tui` terminal chat built with the package Model-Update-View runtime.
+`lib/src/tui/repl_tui.dart` 是一个使用 package Model-Update-View 运行时构建的 `dart_tui` 终端聊天界面。
 
-Supported commands:
+支持的命令：
 
 - `/help`
 - `/status`
@@ -75,40 +75,40 @@ Supported commands:
 - `/cancel`
 - `/exit`
 
-The TUI uses `AgentService` directly, so it exercises the same provider, config, and session path as `dartsub agent`.
-Assistant replies stream to the terminal as provider chunks arrive; after the stream completes, the accumulated reply is appended to the JSONL session. Esc and `/cancel` cancel the active stream through a shared cancellation token. Cancelled turns keep the user message for auditability but do not persist a partial assistant reply.
+TUI 直接使用 `AgentService`，因此它会走与 `dartsub agent` 相同的 provider、config 和 session 路径。
+当 provider chunk 到达时，助手回复会流式输出到终端；流结束后，累积的回复会追加到 JSONL session。Esc 和 `/cancel` 会通过共享 cancellation token 取消活动流。被取消的回合会保留用户消息以便审计，但不会持久化部分助手回复。
 
-Mouse tracking and alternate screen are disabled by default so terminal selection and copy continue to work from normal scrollback. Users can opt in with `dartsub tui --mouse` when they want mouse-wheel scrolling inside the TUI, or `dartsub tui --alt-screen` when they want the previous fullscreen-style terminal surface.
+默认禁用鼠标跟踪和备用屏幕，以便终端选择和复制仍然可以从普通滚屏中工作。用户可以在需要 TUI 内鼠标滚轮滚动时用 `dartsub tui --mouse` 主动开启，或在需要之前那种全屏终端界面时用 `dartsub tui --alt-screen` 开启。
 
-When a model requests a dangerous tool, the TUI pauses the turn and asks for confirmation. Pressing `y` allows that single tool call; pressing `n` or Esc denies it and returns a `permission_denied` tool result to the model.
+当模型请求危险工具时，TUI 会暂停该回合并请求确认。按 `y` 允许这一次工具调用；按 `n` 或 Esc 会拒绝它，并向模型返回 `permission_denied` 工具结果。
 
-Some OpenAI-compatible providers do not reliably follow the exact internal tool wrapper. `ToolRuntime` therefore accepts the strict form and common near-misses, including a tool call embedded after short natural language, a tool name before the JSON payload, and a missing closing `</tool_call>` tag. The TUI clears any leaked in-progress tool text when the permission prompt opens.
+某些 OpenAI-compatible provider 不能稳定遵循精确的内部工具包装格式。因此，`ToolRuntime` 同时接受严格格式和常见近似格式，包括短自然语言之后嵌入的工具调用、JSON payload 之前出现的工具名称，以及缺失闭合 `</tool_call>` 标签的情况。当权限提示打开时，TUI 会清除任何泄漏的进行中工具文本。
 
-OpenClaw's TypeScript TUI uses a dedicated `ChatLog` container next to a dedicated editor component (`src/tui/components/chat-log.ts`, `src/tui/components/custom-editor.ts`, `src/tui/tui.ts`). The Dart TUI follows the same separation at the state-model level: chat history rendering, scroll offset, and input editing are separate pieces of `_ChatTuiModel`.
+OpenClaw 的 TypeScript TUI 使用专用的 `ChatLog` 容器，并搭配专用编辑器组件（`src/tui/components/chat-log.ts`, `src/tui/components/custom-editor.ts`, `src/tui/tui.ts`）。Dart TUI 在状态模型层面遵循同样的分离方式：聊天历史渲染、滚动偏移和输入编辑分别是 `_ChatTuiModel` 的独立部分。
 
-The input line stores state in `dart_tui`'s `TextInputModel`, but `dartsub` applies its own character-level editing wrapper. This keeps `Backspace`, `Ctrl-H`, pasted text, cursor movement, Chinese input, and wide-character display predictable across terminals. Up and Down navigate the current session's previous user inputs while preserving an unsent draft. PageUp, PageDown, Ctrl-U, Ctrl-D, Ctrl-G, and optional mouse wheel events control the chat history viewport instead of modifying the input field. Ctrl-C follows OpenClaw's interactive behavior: it clears current input first, then exits only after a second press while input is empty. Unsupported `unknown` escape events are ignored so older mouse escape sequences cannot leak coordinate bytes into the text field. The TUI also disables `dart_tui`'s cell renderer because it diffs grapheme clusters as single terminal cells, which causes CJK text to drift on terminals where those characters occupy two columns.
+输入行将状态存储在 `dart_tui` 的 `TextInputModel` 中，但 `dartsub` 会应用自己的字符级编辑包装层。这样可以让 `Backspace`、`Ctrl-H`、粘贴文本、光标移动、中文输入和宽字符显示在不同终端中保持可预测。Up 和 Down 会在当前 session 之前的用户输入中导航，同时保留尚未发送的草稿。PageUp、PageDown、Ctrl-U、Ctrl-D、Ctrl-G 以及可选的鼠标滚轮事件控制聊天历史视口，而不是修改输入框。Ctrl-C 遵循 OpenClaw 的交互行为：先清空当前输入，只有在输入为空时第二次按下才会退出。不支持的 `unknown` escape 事件会被忽略，防止旧版鼠标 escape 序列把坐标字节泄漏到文本字段中。TUI 还禁用了 `dart_tui` 的 cell renderer，因为它会把 grapheme cluster 作为单个终端 cell 进行 diff，这会导致 CJK 文本在这些字符占用两列的终端中发生漂移。
 
-`test/tui_smoke_test.dart` drives the TUI through `expect` and covers exit, `Backspace`, `Ctrl-H`, input history recall, Ctrl-C behavior, mouse wheel safety, chat history scrolling, Esc cancellation, `/cancel`, and dangerous tool allow/deny prompts.
+`test/tui_smoke_test.dart` 通过 `expect` 驱动 TUI，并覆盖退出、`Backspace`、`Ctrl-H`、输入历史召回、Ctrl-C 行为、鼠标滚轮安全性、聊天历史滚动、Esc 取消、`/cancel`，以及危险工具的允许/拒绝提示。
 
 ### Doctor
 
-`lib/src/doctor/doctor.dart` performs read-mostly runtime checks:
+`lib/src/doctor/doctor.dart` 执行以读取为主的运行时检查：
 
-- Config file can be loaded or created.
-- Selected environment is configured or falls back to default.
-- Provider kind, base URL, and model are usable.
-- API key is present either directly or via `provider.apiKeyEnv`.
-- Gateway host and port are available.
-- Session directory can be created and listed.
-- Model connectivity succeeds unless `--skip-model` is passed.
+- Config 文件可以被加载或创建。
+- 所选 environment 已配置，或回退到 default。
+- Provider kind、base URL 和 model 可用。
+- API key 可以直接获取，或通过 `provider.apiKeyEnv` 获取。
+- Gateway host 和 port 可用。
+- Session 目录可以被创建和列出。
+- 除非传入 `--skip-model`，否则模型连接检查成功。
 
-The model check sends a tiny non-streaming chat completion request through the selected provider.
+模型检查会通过所选 provider 发送一个很小的非流式 chat completion 请求。
 
 ### Config
 
-`ConfigStore` persists JSON to `~/.dart_sub_claw/config.json` unless `DART_SUB_CLAW_HOME` is set.
+除非设置了 `DART_SUB_CLAW_HOME`，否则 `ConfigStore` 会把 JSON 持久化到 `~/.dart_sub_claw/config.json`。
 
-Supported config keys:
+支持的 config key：
 
 - `provider.kind`
 - `provider.baseUrl`
@@ -123,9 +123,9 @@ Supported config keys:
 - `toolPolicy.tools.<tool>`
 - `toolPolicy.sessions.<session>.<tool>`
 
-The default provider kind is `openai-compatible`. The API key can be stored directly for local experiments, but the preferred path is `provider.apiKeyEnv`.
+默认 provider kind 是 `openai-compatible`。API key 可以直接保存，用于本地实验，但更推荐的路径是 `provider.apiKeyEnv`。
 
-Named environments are stored under `environments.<name>` and can override the provider and gateway config. Use `--env <name>` on `agent`, `gateway`, and `config` commands:
+命名 environment 存储在 `environments.<name>` 下，可以覆盖 provider 和 gateway config。在 `agent`、`gateway` 和 `config` 命令中使用 `--env <name>`：
 
 ```sh
 dartsub config --env test set provider.baseUrl https://ark.cn-beijing.volces.com/api/v3
@@ -135,78 +135,78 @@ dartsub gateway run --env test
 
 ### Agent Service
 
-`AgentService` owns the core turn:
+`AgentService` 负责核心回合：
 
-1. Validate input.
-2. Ensure config exists.
-3. Load prior messages from the session.
-4. Append the user message.
-5. Call the provider with the full history and tool instructions.
-6. Execute requested tool calls when the assistant replies with the internal tool protocol.
-7. Append the final assistant reply.
-8. Return the reply.
+1. 校验输入。
+2. 确保 config 存在。
+3. 从 session 加载历史消息。
+4. 追加用户消息。
+5. 使用完整历史和工具指令调用 provider。
+6. 当助手以内部工具协议回复时，执行所请求的工具调用。
+7. 追加最终助手回复。
+8. 返回回复。
 
-This is the first stable boundary. Routing, streaming, and channel metadata should attach around this service rather than leaking into the provider. Streaming turns accept a cancellation token so TUI controls can stop an in-flight request without committing partial assistant text.
+这是第一个稳定边界。Routing、streaming 和 channel metadata 应该围绕这个服务接入，而不是泄漏进 provider。流式回合接受 cancellation token，因此 TUI 控件可以停止进行中的请求，而不提交部分助手文本。
 
 ### Tool Runtime
 
-`lib/src/tools/tool_runtime.dart` defines the MVP tool schema and executor. The current tools are:
+`lib/src/tools/tool_runtime.dart` 定义 MVP 工具 schema 和 executor。当前工具包括：
 
-- `read_file`: read UTF-8 text from a file under the current working directory. This is classified as `safeRead` and is allowed by default.
-- `write_file`: write UTF-8 text to a file under the current working directory. This is classified as `dangerous`.
-- `shell`: run a non-interactive shell command in the current working directory. This is classified as `dangerous`.
+- `read_file`：从当前工作目录下读取 UTF-8 文本文件。它被归类为 `safeRead`，默认允许。
+- `write_file`：向当前工作目录下写入 UTF-8 文本文件。它被归类为 `dangerous`。
+- `shell`：在当前工作目录中运行非交互式 shell 命令。它被归类为 `dangerous`。
 
-The provider protocol is intentionally text-based for compatibility with any OpenAI-compatible chat endpoint. If the model needs a tool, it must reply with only:
+Provider 协议有意基于文本，以兼容任意 OpenAI-compatible chat endpoint。如果模型需要工具，它必须只回复：
 
 ```text
 <tool_call>{"tool":"read_file","arguments":{"path":"README.md"}}</tool_call>
 ```
 
-`AgentService` executes at most four tool steps, then asks the model to continue with the final answer. Tool result messages are only part of the in-memory provider context for that turn; the JSONL session stores the original user message and final assistant reply, not the internal tool call transcript.
+`AgentService` 最多执行四个工具步骤，然后要求模型继续给出最终答案。工具结果消息只属于该回合的内存 provider context；JSONL session 存储原始用户消息和最终助手回复，不存储内部工具调用 transcript。
 
-`ToolRuntime` defaults to a read-only policy: safe read tools run automatically, and dangerous tools are denied unless the caller provides a permission handler or persisted policy. Persisted policy supports global per-tool decisions and session-scoped overrides under `toolPolicy.tools.<tool>` and `toolPolicy.sessions.<session>.<tool>`, using `ask`, `allow`, or `deny`.
+`ToolRuntime` 默认使用只读策略：safe read 工具会自动运行，dangerous 工具会被拒绝，除非调用方提供 permission handler 或持久化策略。持久化策略支持全局的 per-tool 决策和 session-scoped override，位置在 `toolPolicy.tools.<tool>` 和 `toolPolicy.sessions.<session>.<tool>` 下，取值为 `ask`、`allow` 或 `deny`。
 
-The TUI provides an interactive handler for dangerous tools: `y` allows one call, `a` allows and remembers the tool for the current session, and `n` denies. `agent` and `gateway` do not prompt, so they only run dangerous tools when policy explicitly allows them. For confirmed TUI writes, `write_file` accepts paths under the current working directory and the current user's `Downloads` directory.
+TUI 为危险工具提供交互式 handler：`y` 允许一次调用，`a` 允许并为当前 session 记住该工具，`n` 拒绝。`agent` 和 `gateway` 不会弹出提示，因此只有策略显式允许时才会运行危险工具。对于已确认的 TUI 写入，`write_file` 接受当前工作目录和当前用户 `Downloads` 目录下的路径。
 
-File tools reject paths that escape the process working directory. Shell commands are non-interactive, run with a timeout, and return truncated stdout/stderr.
+文件工具会拒绝逃逸出进程工作目录的路径。Shell 命令是非交互式的，会带 timeout 运行，并返回截断后的 stdout/stderr。
 
 ### Provider
 
-`OpenAiCompatibleProvider` calls:
+`OpenAiCompatibleProvider` 调用：
 
 ```text
 POST {provider.baseUrl}/chat/completions
 ```
 
-It expects:
+它期望：
 
 ```text
 choices[0].message.content
 ```
 
-For detailed callers, provider responses are normalized into `ChatCompletionResult` with optional `ChatCompletionMetadata`. The metadata carries the response `model`, `finishReason`, `usage`, and selected raw top-level provider fields such as `id`, `object`, `created`, and `system_fingerprint`.
+对于需要详细信息的调用方，provider 响应会被规范化为 `ChatCompletionResult`，并可带 `ChatCompletionMetadata`。metadata 携带响应的 `model`、`finishReason`、`usage`，以及选定的原始顶层 provider 字段，例如 `id`、`object`、`created` 和 `system_fingerprint`。
 
-For streaming, it sends `stream: true` and parses server-sent event `data:` lines. Deltas are read from:
+流式模式下，它发送 `stream: true` 并解析 server-sent event `data:` 行。Delta 会从这里读取：
 
 ```text
 choices[0].delta.content
 ```
 
-Streaming detailed callers receive `ChatStreamEvent` values. Delta events carry text chunks, while metadata-only events can update the accumulated metadata for the final turn result.
+流式详细调用方会收到 `ChatStreamEvent` 值。Delta 事件携带文本 chunk，而只含 metadata 的事件可以更新最终回合结果累积的 metadata。
 
-Provider calls use a bounded runtime policy from config:
+Provider 调用使用来自 config 的有界运行时策略：
 
-- `provider.timeoutSeconds`: total timeout for request setup, response reads, and stream idle waits.
-- `provider.maxRetries`: retry count after the first attempt.
-- `provider.retryBackoffMs`: base retry delay, doubled per retry attempt.
+- `provider.timeoutSeconds`：请求建立、响应读取和流空闲等待的总 timeout。
+- `provider.maxRetries`：首次尝试之后的 retry 次数。
+- `provider.retryBackoffMs`：基础 retry delay，每次 retry 翻倍。
 
-Non-streaming calls retry timeout, connection errors, HTTP 429, and HTTP 5xx responses. Streaming calls retry only before the first delta is emitted; after any delta reaches the caller, the provider does not retry because that could duplicate assistant text.
+非流式调用会在 timeout、连接错误、HTTP 429 和 HTTP 5xx 响应时 retry。流式调用只会在第一个 delta 发出前 retry；一旦有任何 delta 到达调用方，provider 就不会 retry，因为这可能重复助手文本。
 
 ### Gateway
 
-`GatewayServer` uses `dart:io` only.
+`GatewayServer` 仅使用 `dart:io`。
 
-Current endpoints:
+当前 endpoint：
 
 - `GET /health`
 - `GET /sessions`
@@ -214,7 +214,7 @@ Current endpoints:
 - `POST /agent/stream`
 - `WS /events`
 
-The gateway broadcasts coarse lifecycle events:
+Gateway 会广播粗粒度 lifecycle event：
 
 - `hello`
 - `agent.started`
@@ -223,9 +223,9 @@ The gateway broadcasts coarse lifecycle events:
 - `agent.cancelled`
 - `error`
 
-`POST /agent` remains the simple JSON request-response path. Successful responses include `requestId`, `sessionId`, `reply`, and `metadata` when the selected provider exposes it. `POST /agent/stream` returns server-sent events named `started`, `delta`, `completed`, `cancelled`, and `error`; completed events also include `metadata` when available. Every `/agent`, `/agent/stream`, and WebSocket lifecycle event for a turn carries the same `requestId`, which gives future UIs and channel adapters a stable key for logs, cancellation controls, retries, and error display.
+`POST /agent` 仍然是简单的 JSON request-response 路径。成功响应包含 `requestId`、`sessionId`、`reply`，并在所选 provider 暴露 metadata 时包含 `metadata`。`POST /agent/stream` 返回名为 `started`、`delta`、`completed`、`cancelled` 和 `error` 的 server-sent event；completed 事件也会在可用时包含 `metadata`。某个回合的每个 `/agent`、`/agent/stream` 和 WebSocket lifecycle event 都携带同一个 `requestId`，为未来 UI 和 channel adapter 提供稳定的日志、取消控件、retry 和错误展示 key。
 
-Gateway errors use top-level `code`, `message`, and `requestId` fields. Current error codes are:
+Gateway 错误使用顶层 `code`、`message` 和 `requestId` 字段。当前错误码包括：
 
 - `validation_error`
 - `provider_error`
@@ -234,49 +234,49 @@ Gateway errors use top-level `code`, `message`, and `requestId` fields. Current 
 - `internal_error`
 - `not_found`
 
-Client disconnects cancel the active provider request through the same cancellation token used by the TUI, so a disconnected stream does not persist partial assistant text.
+客户端断开连接会通过与 TUI 相同的 cancellation token 取消活动 provider 请求，因此断开的流不会持久化部分助手文本。
 
-When the gateway is started with `--env test`, `/agent` and `/agent/stream` use that environment by default. A request body can override it with an `environment` field.
+当 gateway 以 `--env test` 启动时，`/agent` 和 `/agent/stream` 默认使用该 environment。请求体可以通过 `environment` 字段覆盖它。
 
 ### Sessions
 
-Sessions are JSONL files:
+Sessions 是 JSONL 文件：
 
 ```text
 ~/.dart_sub_claw/sessions/default.jsonl
 ```
 
-Each line is:
+每一行都是：
 
 ```json
-{"role":"user","content":"hello","createdAt":"2026-05-15T00:00:00.000Z"}
+{ "role": "user", "content": "hello", "createdAt": "2026-05-15T00:00:00.000Z" }
 ```
 
-JSONL is intentionally chosen because it is append-friendly and easy to inspect during early development.
+有意选择 JSONL，是因为它便于追加，并且在早期开发中容易检查。
 
 ### Channels
 
-`lib/src/channels/channel.dart` defines only the future adapter shape. No real messaging channel is implemented yet.
+`lib/src/channels/channel.dart` 只定义未来的 adapter 形状。当前尚未实现真实消息 channel。
 
-The first real channel should probably be a webhook channel or Telegram. WhatsApp, Discord, Slack, Signal, iMessage, plugins, media, pairing, allowlists, and command gating should come after the core loop is stable.
+第一个真实 channel 可能应该是 webhook channel 或 Telegram。WhatsApp、Discord、Slack、Signal、iMessage、plugins、media、pairing、allowlists 和 command gating 应该在核心循环稳定之后再加入。
 
-## Non Goals For MVP
+## MVP 非目标
 
-- No OpenClaw config compatibility.
-- No plugin system.
-- No media pipeline.
-- No channel auth, pairing, or allowlists.
-- No daemon/service installer.
-- No fallback model routing.
-- No Codex/Claude/Pi CLI backend support.
-- No browser automation.
-- No mobile/macOS app integration.
+- 不兼容 OpenClaw config。
+- 不实现 plugin system。
+- 不实现 media pipeline。
+- 不实现 channel auth、pairing 或 allowlists。
+- 不实现 daemon/service installer。
+- 不实现 fallback model routing。
+- 不支持 Codex/Claude/Pi CLI backend。
+- 不实现 browser automation。
+- 不集成 mobile/macOS app。
 
-## Compatibility Rules
+## 兼容性规则
 
-During early development, keep `dart_sub_claw` isolated:
+在早期开发期间，让 `dart_sub_claw` 保持隔离：
 
-- Do not write to `~/.openclaw`.
-- Do not bind the same default port as OpenClaw.
-- Do not assume OpenClaw plugin packages can be loaded by Dart.
-- Treat this as a new implementation that may later gain import/export bridges.
+- 不写入 `~/.openclaw`。
+- 不绑定与 OpenClaw 相同的默认端口。
+- 不假设 OpenClaw plugin package 可以被 Dart 加载。
+- 将它视为一个新的实现，之后可能会获得 import/export bridge。
