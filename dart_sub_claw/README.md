@@ -37,6 +37,9 @@ Set provider config:
 ```sh
 dartsub config set provider.model gpt-4.1-mini
 dartsub config set provider.apiKeyEnv OPENAI_API_KEY
+dartsub config set provider.timeoutSeconds 60
+dartsub config set provider.maxRetries 2
+dartsub config set provider.retryBackoffMs 500
 ```
 
 Set provider config for a named environment:
@@ -65,9 +68,24 @@ Start the terminal chat UI:
 ```sh
 dartsub tui
 dartsub tui --env test --session test
+dartsub tui --mouse
+dartsub tui --alt-screen
 ```
 
-The TUI is built with `dart_tui`. It uses the package Model-Update-View runtime and spinner, while `dartsub` owns input editing compatibility for `Backspace`, `Ctrl-H`, pasted text, and wide-character wrapping. It shows a `思考中` spinner until the first streamed chunk arrives, streams assistant output as chunks arrive from the provider, and then persists the full reply to the session.
+The TUI is built with `dart_tui`. It uses the package Model-Update-View runtime and spinner, while `dartsub` owns input editing compatibility for `Backspace`, `Ctrl-H`, pasted text, and wide-character wrapping. It shows a `思考中` spinner until the first streamed chunk arrives, streams assistant output as chunks arrive from the provider, and then persists the full reply to the session. Esc or `/cancel` cancels an active provider stream without saving a partial assistant reply.
+
+Mouse capture and alternate screen are off by default so terminal text can be selected and copied normally from the scrollback. Start with `--mouse` if you prefer mouse-wheel scrolling inside the TUI, or `--alt-screen` if you prefer the previous fullscreen-style terminal surface.
+
+The agent runtime includes an MVP tool loop. Models can request tools using the internal `<tool_call>{...}</tool_call>` protocol, and `dartsub` executes these controlled tools in the current working directory:
+
+```text
+read_file   read a UTF-8 text file
+write_file  write UTF-8 text to a file
+shell       run a non-interactive shell command
+```
+
+Tool file paths are restricted to the current working directory. Shell commands run non-interactively with a timeout and truncated output.
+By default, only `read_file` is allowed automatically. `write_file` and `shell` are treated as dangerous tools and require explicit approval. The TUI prompts before running them; non-interactive entrypoints deny them unless a permission handler is provided by the caller. After approval, TUI `write_file` can write under the current working directory and the current user's `Downloads` directory.
 
 TUI keys:
 
@@ -79,8 +97,9 @@ Ctrl-H          delete the previous character in terminals that emit Ctrl-H
 PageUp/PageDown scroll chat history
 Ctrl-U/Ctrl-D   scroll chat history
 Ctrl-G          jump back to the latest message
-Mouse wheel     scroll chat history
-Ctrl-C          exit the TUI
+Mouse wheel     scroll chat history when started with --mouse
+Esc             cancel the active assistant response
+Ctrl-C          clear current input; press twice with empty input to exit
 ```
 
 TUI commands:
@@ -92,6 +111,7 @@ TUI commands:
 /session <id>
 /env <name|default>
 /clear
+/cancel
 /exit
 ```
 
@@ -104,11 +124,14 @@ dartsub doctor --skip-model
 ```
 
 `doctor` checks config loading, provider fields, API key availability, model connectivity, gateway port availability, and the session directory.
+It also validates provider timeout and retry settings.
 
 Run the current smoke tests:
 
 ```sh
 dart run test/agent_service_test.dart
+dart run test/gateway_stream_test.dart
+dart run test/provider_resilience_test.dart
 dart run test/tui_smoke_test.dart
 ```
 
@@ -126,6 +149,7 @@ Endpoints:
 GET  /health
 GET  /sessions
 POST /agent
+POST /agent/stream
 WS   /events
 ```
 
@@ -135,6 +159,22 @@ Example:
 curl -s http://127.0.0.1:18987/agent \
   -H 'content-type: application/json' \
   -d '{"message":"hello","sessionId":"default","environment":"test"}'
+```
+
+Streaming example:
+
+```sh
+curl -N http://127.0.0.1:18987/agent/stream \
+  -H 'content-type: application/json' \
+  -d '{"message":"hello","sessionId":"default","environment":"test"}'
+```
+
+`/agent` responses include `requestId`, `sessionId`, and `reply`. `/agent/stream` returns server-sent events named `started`, `delta`, `completed`, `cancelled`, and `error`; every event includes the same `requestId` for that turn. If the client disconnects while the model is responding, `dartsub` cancels the provider request and does not save a partial assistant reply.
+
+Errors use a stable shape:
+
+```json
+{"requestId":"req_...","code":"validation_error","message":"message is required"}
 ```
 
 ## Runtime Data

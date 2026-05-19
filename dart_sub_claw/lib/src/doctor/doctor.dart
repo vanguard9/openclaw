@@ -94,6 +94,7 @@ class DartSubDoctor {
 
     checks.add(_checkEnvironment(config, envName));
     checks.add(_checkProvider(envConfig.provider));
+    checks.add(_checkProviderRuntime(envConfig.provider));
     checks.add(_checkApiKey(envConfig.provider));
     checks.add(await _checkGatewayPort(envConfig.gateway));
     checks.add(await _checkSessions());
@@ -163,6 +164,33 @@ class DartSubDoctor {
       name: 'provider',
       message: '${provider.kind} ${provider.model}',
       detail: provider.baseUrl,
+    );
+  }
+
+  DoctorCheck _checkProviderRuntime(ProviderConfig provider) {
+    final errors = <String>[];
+    if (provider.timeoutSeconds < 1) {
+      errors.add('provider.timeoutSeconds must be >= 1');
+    }
+    if (provider.maxRetries < 0) {
+      errors.add('provider.maxRetries must be >= 0');
+    }
+    if (provider.retryBackoffMs < 0) {
+      errors.add('provider.retryBackoffMs must be >= 0');
+    }
+    if (errors.isNotEmpty) {
+      return DoctorCheck(
+        status: DoctorStatus.fail,
+        name: 'provider runtime',
+        message: 'invalid timeout or retry config',
+        detail: errors.join('; '),
+      );
+    }
+    return DoctorCheck(
+      status: DoctorStatus.ok,
+      name: 'provider runtime',
+      message:
+          'timeout=${provider.timeoutSeconds}s retries=${provider.maxRetries} backoff=${provider.retryBackoffMs}ms',
     );
   }
 

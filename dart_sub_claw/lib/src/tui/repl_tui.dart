@@ -1,14 +1,17 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:characters/characters.dart';
 import 'package:dart_tui/dart_tui.dart';
 
+import '../agent/cancellation.dart';
 import '../agent/agent_service.dart';
 import '../config/app_config.dart';
 import '../config/config_store.dart';
 import '../sessions/chat_message.dart';
 import '../sessions/session_store.dart';
+import '../tools/tool_runtime.dart';
 
 const Object _copyUnset = Object();
 const int _maxInputHistory = 100;
@@ -20,35 +23,51 @@ class ReplTui {
     AgentService? agentService,
   })  : configStore = configStore ?? ConfigStore(),
         sessionStore = sessionStore ?? SessionStore(),
-        agentService = agentService ?? AgentService();
+        _agentService = agentService;
 
   final ConfigStore configStore;
   final SessionStore sessionStore;
-  final AgentService agentService;
+  final AgentService? _agentService;
 
   Future<int> run({
     String sessionId = 'default',
     String? environment,
     int historyLimit = 12,
+    bool captureMouse = false,
+    bool altScreen = false,
   }) async {
     final config = await configStore.ensureExists();
     final envName = normalizeEnvironmentName(environment);
     final history = await sessionStore.read(sessionId);
     late final Program program;
+    late final AgentService service;
     program = Program(
       programOptions: [
-        withAltScreen(),
+        if (altScreen) withAltScreen(),
         withHideCursor(false),
         withTickInterval(const Duration(milliseconds: 100)),
-        withMouseCellMotion(),
+        if (captureMouse) withMouseCellMotion(),
         withoutSignalHandler(),
       ],
     );
+    service = _agentService ??
+        AgentService(
+          configStore: configStore,
+          sessionStore: sessionStore,
+          toolRuntime: ToolRuntime(
+            writableRoots: _defaultWritableRoots(),
+            permissionHandler: (request) {
+              final completer = Completer<ToolPermissionDecision>();
+              program.send(_ToolPermissionPromptMsg(request, completer));
+              return completer.future;
+            },
+          ),
+        );
     await program.run(
       _ChatTuiModel(
         config: config,
         sessionStore: sessionStore,
-        agentService: agentService,
+        agentService: service,
         sessionId: sessionId,
         environment: envName,
         historyLimit: historyLimit,
@@ -83,6 +102,9 @@ final class _ChatTuiModel extends TeaModel {
     this.draftInput = '',
     this.ignoredUnknownSequenceChars = 0,
     this.scrollOffset = 0,
+    this.activeCancellation,
+    this.pendingToolPermission,
+    this.lastCtrlCAt,
   })  : input = input ??
             TextInputModel(
               placeholder: '输入消息或 /help',
@@ -113,6 +135,9 @@ final class _ChatTuiModel extends TeaModel {
   final String draftInput;
   final int ignoredUnknownSequenceChars;
   final int scrollOffset;
+  final CancellationController? activeCancellation;
+  final _PendingToolPermission? pendingToolPermission;
+  final int? lastCtrlCAt;
 
   _ChatTuiModel copyWith({
     String? sessionId,
@@ -132,6 +157,9 @@ final class _ChatTuiModel extends TeaModel {
     String? draftInput,
     int? ignoredUnknownSequenceChars,
     int? scrollOffset,
+    Object? activeCancellation = _copyUnset,
+    Object? pendingToolPermission = _copyUnset,
+    int? lastCtrlCAt,
   }) {
     return _ChatTuiModel(
       config: config,
@@ -157,6 +185,13 @@ final class _ChatTuiModel extends TeaModel {
       ignoredUnknownSequenceChars:
           ignoredUnknownSequenceChars ?? this.ignoredUnknownSequenceChars,
       scrollOffset: scrollOffset ?? this.scrollOffset,
+      activeCancellation: identical(activeCancellation, _copyUnset)
+          ? this.activeCancellation
+          : activeCancellation as CancellationController?,
+      pendingToolPermission: identical(pendingToolPermission, _copyUnset)
+          ? this.pendingToolPermission
+          : pendingToolPermission as _PendingToolPermission?,
+      lastCtrlCAt: lastCtrlCAt ?? this.lastCtrlCAt,
     );
   }
 
@@ -199,6 +234,21 @@ final class _ChatTuiModel extends TeaModel {
           activeAssistantText: '',
           clearNotice: true,
           scrollOffset: 0,
+          activeCancellation: null,
+          pendingToolPermission: null,
+        ),
+        null,
+      );
+    }
+
+    if (msg is _AgentCancelledMsg) {
+      return (
+        copyWith(
+          thinking: false,
+          activeAssistantText: '',
+          notice: 'run cancelled',
+          activeCancellation: null,
+          pendingToolPermission: null,
         ),
         null,
       );
@@ -210,6 +260,20 @@ final class _ChatTuiModel extends TeaModel {
           thinking: false,
           activeAssistantText: '',
           notice: 'error: ${msg.message}',
+          activeCancellation: null,
+          pendingToolPermission: null,
+        ),
+        null,
+      );
+    }
+
+    if (msg is _ToolPermissionPromptMsg) {
+      return (
+        copyWith(
+          pendingToolPermission:
+              _PendingToolPermission(msg.request, msg.completer),
+          activeAssistantText: '',
+          clearNotice: true,
         ),
         null,
       );
@@ -249,11 +313,14 @@ final class _ChatTuiModel extends TeaModel {
     }
 
     if (msg is KeyMsg) {
-      if (msg.key == 'ctrl+c') {
-        return (this, _quitCommand(130));
+      if (pendingToolPermission != null) {
+        return _handleToolPermissionKey(msg);
       }
-      if (thinking) {
-        return (this, null);
+      if (msg.key == 'ctrl+c') {
+        return _handleCtrlC();
+      }
+      if (msg.key == 'esc') {
+        return _handleEscape();
       }
       if (msg.key == 'pgup' || msg.key == 'ctrl+u') {
         return (
@@ -320,6 +387,80 @@ final class _ChatTuiModel extends TeaModel {
     return (this, null);
   }
 
+  (Model, Cmd?) _handleCtrlC() {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (input.value.isNotEmpty) {
+      return (
+        copyWith(
+          input: input.copyWith(value: '', cursorPos: 0),
+          inputHistoryIndex: null,
+          draftInput: '',
+          ignoredUnknownSequenceChars: 0,
+          notice: 'cleared input; press ctrl+c again to exit',
+          lastCtrlCAt: now,
+        ),
+        null,
+      );
+    }
+
+    if (lastCtrlCAt != null && now - lastCtrlCAt! <= 1000) {
+      return (this, _quitCommand(0));
+    }
+
+    return (
+      copyWith(
+        notice: 'press ctrl+c again to exit',
+        lastCtrlCAt: now,
+      ),
+      null,
+    );
+  }
+
+  (Model, Cmd?) _handleEscape() {
+    if (pendingToolPermission != null) {
+      return _resolveToolPermission(ToolPermissionDecision.deny);
+    }
+    if (thinking && activeCancellation != null) {
+      activeCancellation!.cancel();
+      return (copyWith(notice: 'cancelling run...'), null);
+    }
+    return (copyWith(clearNotice: true), null);
+  }
+
+  (Model, Cmd?) _handleToolPermissionKey(KeyMsg msg) {
+    final text = msg.keyEvent.text.toLowerCase();
+    final key = msg.key.toLowerCase();
+    if (key == 'y' || text == 'y') {
+      return _resolveToolPermission(ToolPermissionDecision.allow);
+    }
+    if (key == 'n' || key == 'esc' || text == 'n') {
+      return _resolveToolPermission(ToolPermissionDecision.deny);
+    }
+    return (
+      copyWith(notice: 'press y to allow or n to deny the tool request'),
+      null,
+    );
+  }
+
+  (Model, Cmd?) _resolveToolPermission(ToolPermissionDecision decision) {
+    final pending = pendingToolPermission;
+    if (pending == null) {
+      return (this, null);
+    }
+    if (!pending.completer.isCompleted) {
+      pending.completer.complete(decision);
+    }
+    return (
+      copyWith(
+        pendingToolPermission: null,
+        notice: decision == ToolPermissionDecision.allow
+            ? 'allowed tool ${pending.request.tool}'
+            : 'denied tool ${pending.request.tool}',
+      ),
+      null,
+    );
+  }
+
   (Model, Cmd?) _handleInputActions(List<_InputAction> actions) {
     var nextInput = input;
     for (final action in actions) {
@@ -358,10 +499,20 @@ final class _ChatTuiModel extends TeaModel {
         input: sourceInput,
       )._handleSlashCommand(value);
     }
+    if (thinking) {
+      return (
+        copyWith(
+          input: sourceInput,
+          notice: 'assistant is still responding; use /cancel or Esc',
+        ),
+        null,
+      );
+    }
     final nextMessages = [
       ...messages,
       _ChatLine.user(value),
     ];
+    final cancellation = CancellationController();
     return (
       copyWith(
         messages: _trimLines(nextMessages, historyLimit),
@@ -373,9 +524,10 @@ final class _ChatTuiModel extends TeaModel {
         input: sourceInput.copyWith(value: '', cursorPos: 0),
         thinking: true,
         activeAssistantText: '',
+        activeCancellation: cancellation,
         clearNotice: true,
       ),
-      _runAgentCommand(value),
+      _runAgentCommand(value, cancellation),
     );
   }
 
@@ -456,6 +608,24 @@ final class _ChatTuiModel extends TeaModel {
     final parts = value.split(RegExp(r'\s+'));
     final command = parts.first.toLowerCase();
     switch (command) {
+      case '/cancel':
+        if (thinking && activeCancellation != null) {
+          activeCancellation!.cancel();
+          return (
+            copyWith(
+              input: input.copyWith(value: '', cursorPos: 0),
+              notice: 'cancelling run...',
+            ),
+            null,
+          );
+        }
+        return (
+          copyWith(
+            input: input.copyWith(value: '', cursorPos: 0),
+            notice: 'no active run',
+          ),
+          null,
+        );
       case '/exit':
       case '/quit':
         return (this, _quitCommand(0));
@@ -464,7 +634,7 @@ final class _ChatTuiModel extends TeaModel {
           copyWith(
             input: input.copyWith(value: '', cursorPos: 0),
             notice:
-                'commands: /help /status /history /session <id> /env <name|default> /clear /exit',
+                'commands: /help /status /history /session <id> /env <name|default> /clear /cancel /exit',
           ),
           null,
         );
@@ -540,23 +710,33 @@ final class _ChatTuiModel extends TeaModel {
     }
   }
 
-  Cmd _runAgentCommand(String value) {
+  Cmd _runAgentCommand(String value, CancellationController cancellation) {
     return () {
-      unawaited(_runAgent(value));
+      unawaited(_runAgent(value, cancellation));
       return null;
     };
   }
 
-  Future<void> _runAgent(String value) async {
+  Future<void> _runAgent(
+    String value,
+    CancellationController cancellation,
+  ) async {
     try {
       final result = await agentService.runTurnStreaming(
         message: value,
         sessionId: sessionId,
         environment: environment,
+        cancellationToken: cancellation.token,
         onDelta: (delta) => send(_AgentDeltaMsg(delta)),
       );
       send(_AgentCompleteMsg(result.reply));
+    } on CancelledException {
+      send(_AgentCancelledMsg());
     } catch (error) {
+      if (cancellation.isCancelled) {
+        send(_AgentCancelledMsg());
+        return;
+      }
       send(_AgentErrorMsg('$error'));
     }
   }
@@ -584,7 +764,7 @@ final class _ChatTuiModel extends TeaModel {
       ),
       ..._wrapLine('baseUrl=${envConfig.provider.baseUrl}', contentWidth),
       ..._wrapLine(
-        'commands: /help /status /history /session <id> /env <name|default> /clear /exit',
+        'commands: /help /status /history /session <id> /env <name|default> /clear /cancel /exit',
         contentWidth,
       ),
       '',
@@ -602,6 +782,12 @@ final class _ChatTuiModel extends TeaModel {
     lines.addAll(bodyLines.sublist(visibleStart, visibleEnd));
 
     lines.add('');
+    if (pendingToolPermission != null) {
+      lines.addAll(_wrapLine(
+        _permissionPrompt(pendingToolPermission!.request),
+        contentWidth,
+      ));
+    }
     if (thinking && activeAssistantText.isEmpty) {
       lines.add(spinner.view().content);
     }
@@ -642,6 +828,20 @@ final class _ChatTuiModel extends TeaModel {
     }
     return bodyLines;
   }
+}
+
+String _permissionPrompt(ToolPermissionRequest request) {
+  final args = _oneLine(jsonEncode(request.arguments));
+  return 'confirm: allow dangerous tool ${request.tool}? y/n args=$args';
+}
+
+List<Directory> _defaultWritableRoots() {
+  final home =
+      Platform.environment['HOME'] ?? Platform.environment['USERPROFILE'];
+  if (home == null || home.isEmpty) {
+    return const [];
+  }
+  return [Directory('$home${Platform.pathSeparator}Downloads')];
 }
 
 final class _InputRender {
@@ -943,6 +1143,8 @@ final class _AgentCompleteMsg extends Msg {
   final String reply;
 }
 
+final class _AgentCancelledMsg extends Msg {}
+
 final class _AgentErrorMsg extends Msg {
   _AgentErrorMsg(this.message);
   final String message;
@@ -952,6 +1154,20 @@ final class _HistoryLoadedMsg extends Msg {
   _HistoryLoadedMsg(this.sessionId, this.messages);
   final String sessionId;
   final List<ChatMessage> messages;
+}
+
+final class _ToolPermissionPromptMsg extends Msg {
+  _ToolPermissionPromptMsg(this.request, this.completer);
+
+  final ToolPermissionRequest request;
+  final Completer<ToolPermissionDecision> completer;
+}
+
+final class _PendingToolPermission {
+  _PendingToolPermission(this.request, this.completer);
+
+  final ToolPermissionRequest request;
+  final Completer<ToolPermissionDecision> completer;
 }
 
 List<_ChatLine> _linesFromHistory(List<ChatMessage> history, int limit) {

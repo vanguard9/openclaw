@@ -101,6 +101,28 @@ class ConfigStore {
       case 'provider.apiKeyEnv':
         return config.copyWith(
             provider: config.provider.copyWith(apiKeyEnv: rawValue));
+      case 'provider.timeoutSeconds':
+        return config.copyWith(
+          provider: config.provider.copyWith(
+            timeoutSeconds: _parseNonNegativeInt(
+              rawValue,
+              path,
+              min: 1,
+            ),
+          ),
+        );
+      case 'provider.maxRetries':
+        return config.copyWith(
+          provider: config.provider.copyWith(
+            maxRetries: _parseNonNegativeInt(rawValue, path),
+          ),
+        );
+      case 'provider.retryBackoffMs':
+        return config.copyWith(
+          provider: config.provider.copyWith(
+            retryBackoffMs: _parseNonNegativeInt(rawValue, path),
+          ),
+        );
       case 'gateway.host':
         return config.copyWith(
             gateway: config.gateway.copyWith(host: rawValue));
@@ -113,6 +135,14 @@ class ConfigStore {
       default:
         throw ArgumentError('Unsupported config key: $path');
     }
+  }
+
+  int _parseNonNegativeInt(String rawValue, String path, {int min = 0}) {
+    final value = int.tryParse(rawValue);
+    if (value == null || value < min) {
+      throw FormatException('$path must be an integer >= $min.');
+    }
+    return value;
   }
 }
 

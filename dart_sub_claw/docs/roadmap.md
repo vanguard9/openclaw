@@ -17,8 +17,14 @@ Deliverables:
 - `tui` command using `dart_tui` for terminal chat.
 - TUI input history with Up and Down recall.
 - TUI chat history scrolling with PageUp, PageDown, Ctrl-U, Ctrl-D, Ctrl-G, and mouse wheel.
+- TUI runtime controls for Esc, `/cancel`, and OpenClaw-style Ctrl-C.
 - `doctor` command for config, provider, model, port, and session checks.
-- Local gateway with `/health`, `/sessions`, `/agent`, and `/events`.
+- Local gateway with `/health`, `/sessions`, `/agent`, `/agent/stream`, and `/events`.
+- Gateway SSE streaming with `/agent/stream` and disconnect cancellation.
+- Gateway request IDs and structured error codes.
+- Provider timeout, retry, and backoff controls.
+- Tool runtime MVP with `shell`, `read_file`, and `write_file`.
+- Tool permission model with read-only defaults and TUI confirmation for dangerous tools.
 - Architecture documentation.
 
 Exit criteria:
@@ -36,7 +42,7 @@ Deliverables:
 - Add a real test dependency and unit tests.
 - Expand TUI smoke coverage beyond input editing and command handling.
 - Add provider response metadata.
-- Add request timeout controls.
+- Add persistent tool policy controls, such as per-tool allowlists and session-scoped remember decisions.
 - Add structured logging.
 - Add a small `doctor` command for config and provider checks.
 
@@ -46,8 +52,7 @@ Deliverables:
 
 - Streaming provider responses.
 - Gateway event stream with token deltas.
-- Request IDs and session IDs in every event.
-- Error codes instead of plain error strings.
+- Request cancellation surfaced through gateway streams.
 - Minimal OpenAI-compatible HTTP surface if useful.
 
 ## Phase 3: First Channel Adapter

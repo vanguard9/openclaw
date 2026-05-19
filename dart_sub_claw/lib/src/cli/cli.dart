@@ -65,6 +65,8 @@ Future<int> _runTui(List<String> args, IOSink out) async {
       Platform.environment['DARTSUB_ENV'];
   final sessionId = _optionValue(args, '--session') ?? 'default';
   final historyRaw = _optionValue(args, '--history');
+  final captureMouse = args.contains('--mouse');
+  final altScreen = args.contains('--alt-screen');
   final historyLimit = historyRaw == null ? 12 : int.tryParse(historyRaw);
   if (historyLimit == null || historyLimit < 0) {
     out.writeln('--history must be a non-negative number');
@@ -74,6 +76,8 @@ Future<int> _runTui(List<String> args, IOSink out) async {
     sessionId: sessionId,
     environment: environment,
     historyLimit: historyLimit,
+    captureMouse: captureMouse,
+    altScreen: altScreen,
   );
 }
 
@@ -189,7 +193,8 @@ Commands:
   agent [--env <name>] --message <text> [--session <id>] Run one agent turn
   gateway run [--env <name>] [--host <host>] [--port <port>]
                                                        Start local HTTP/WebSocket gateway
-  tui [--env <name>] [--session <id>] [--history <n>]  Start terminal chat
+  tui [--env <name>] [--session <id>] [--history <n>] [--mouse] [--alt-screen]
+                                                       Start terminal chat
   doctor [--env <name>] [--skip-model]                 Check config and runtime health
   config [--env <name>] list                          Show config
   config [--env <name>] get <key>                     Read config value
@@ -200,6 +205,9 @@ Useful config keys:
   provider.model
   provider.apiKey
   provider.apiKeyEnv
+  provider.timeoutSeconds
+  provider.maxRetries
+  provider.retryBackoffMs
   gateway.host
   gateway.port
 ''');

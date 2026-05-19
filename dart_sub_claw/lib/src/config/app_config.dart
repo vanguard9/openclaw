@@ -106,6 +106,9 @@ class ProviderConfig {
     this.model = 'gpt-4.1-mini',
     this.apiKey,
     this.apiKeyEnv = 'OPENAI_API_KEY',
+    this.timeoutSeconds = 60,
+    this.maxRetries = 2,
+    this.retryBackoffMs = 500,
   });
 
   final String kind;
@@ -113,6 +116,9 @@ class ProviderConfig {
   final String model;
   final String? apiKey;
   final String apiKeyEnv;
+  final int timeoutSeconds;
+  final int maxRetries;
+  final int retryBackoffMs;
 
   factory ProviderConfig.fromJson(Map<String, Object?> json) {
     return ProviderConfig(
@@ -121,6 +127,9 @@ class ProviderConfig {
       model: _stringAt(json, 'model') ?? 'gpt-4.1-mini',
       apiKey: _stringAt(json, 'apiKey'),
       apiKeyEnv: _stringAt(json, 'apiKeyEnv') ?? 'OPENAI_API_KEY',
+      timeoutSeconds: _intAt(json, 'timeoutSeconds') ?? 60,
+      maxRetries: _intAt(json, 'maxRetries') ?? 2,
+      retryBackoffMs: _intAt(json, 'retryBackoffMs') ?? 500,
     );
   }
 
@@ -130,6 +139,9 @@ class ProviderConfig {
         'model': model,
         if (apiKey != null && apiKey!.isNotEmpty) 'apiKey': apiKey,
         'apiKeyEnv': apiKeyEnv,
+        'timeoutSeconds': timeoutSeconds,
+        'maxRetries': maxRetries,
+        'retryBackoffMs': retryBackoffMs,
       };
 
   ProviderConfig copyWith({
@@ -138,6 +150,9 @@ class ProviderConfig {
     String? model,
     String? apiKey,
     String? apiKeyEnv,
+    int? timeoutSeconds,
+    int? maxRetries,
+    int? retryBackoffMs,
   }) {
     return ProviderConfig(
       kind: kind ?? this.kind,
@@ -145,6 +160,9 @@ class ProviderConfig {
       model: model ?? this.model,
       apiKey: apiKey ?? this.apiKey,
       apiKeyEnv: apiKeyEnv ?? this.apiKeyEnv,
+      timeoutSeconds: timeoutSeconds ?? this.timeoutSeconds,
+      maxRetries: maxRetries ?? this.maxRetries,
+      retryBackoffMs: retryBackoffMs ?? this.retryBackoffMs,
     );
   }
 }
