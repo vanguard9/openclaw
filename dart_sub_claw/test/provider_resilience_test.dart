@@ -10,6 +10,7 @@ import 'package:dart_sub_claw/src/providers/openai_compatible_provider.dart';
 import 'package:dart_sub_claw/src/sessions/chat_message.dart';
 import 'package:dart_sub_claw/src/sessions/session_store.dart';
 import 'package:dart_sub_claw/src/tools/tool_policy.dart';
+import 'package:dart_sub_claw/src/tui/tui_strings.dart';
 
 Future<void> main() async {
   await _testNonStreamingMetadata();
@@ -276,6 +277,10 @@ Future<void> _testConfigStoresToolPolicy() async {
     if (config.environments['dev']?.toolPolicy.sessions['test']?['shell'] !=
         ToolPolicyDecision.allow) {
       throw StateError('environment tool policy was not stored');
+    }
+    config = await store.setValue('tui.locale', 'zh-CN');
+    if (config.tui.locale != TuiLocalePreference.zhCn) {
+      throw StateError('TUI locale was not stored');
     }
   } finally {
     await temp.delete(recursive: true);

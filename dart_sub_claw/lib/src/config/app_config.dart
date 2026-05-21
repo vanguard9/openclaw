@@ -1,19 +1,23 @@
 import '../tools/tool_policy.dart';
+import '../tui/tui_strings.dart';
 
 class AppConfig {
   AppConfig({
     ProviderConfig? provider,
     GatewayConfig? gateway,
     ToolPolicyConfig? toolPolicy,
+    TuiConfig? tui,
     Map<String, EnvironmentConfig>? environments,
   })  : provider = provider ?? ProviderConfig(),
         gateway = gateway ?? GatewayConfig(),
         toolPolicy = toolPolicy ?? ToolPolicyConfig(),
+        tui = tui ?? TuiConfig(),
         environments = Map.unmodifiable(environments ?? const {});
 
   final ProviderConfig provider;
   final GatewayConfig gateway;
   final ToolPolicyConfig toolPolicy;
+  final TuiConfig tui;
   final Map<String, EnvironmentConfig> environments;
 
   factory AppConfig.fromJson(Map<String, Object?> json) {
@@ -21,6 +25,7 @@ class AppConfig {
       provider: ProviderConfig.fromJson(_mapAt(json, 'provider')),
       gateway: GatewayConfig.fromJson(_mapAt(json, 'gateway')),
       toolPolicy: ToolPolicyConfig.fromJson(_mapAt(json, 'toolPolicy')),
+      tui: TuiConfig.fromJson(_mapAt(json, 'tui')),
       environments: _environmentsFromJson(_mapAt(json, 'environments')),
     );
   }
@@ -29,6 +34,7 @@ class AppConfig {
         'provider': provider.toJson(),
         'gateway': gateway.toJson(),
         'toolPolicy': toolPolicy.toJson(),
+        'tui': tui.toJson(),
         if (environments.isNotEmpty)
           'environments': environments.map(
             (key, value) => MapEntry(key, value.toJson()),
@@ -39,12 +45,14 @@ class AppConfig {
     ProviderConfig? provider,
     GatewayConfig? gateway,
     ToolPolicyConfig? toolPolicy,
+    TuiConfig? tui,
     Map<String, EnvironmentConfig>? environments,
   }) {
     return AppConfig(
       provider: provider ?? this.provider,
       gateway: gateway ?? this.gateway,
       toolPolicy: toolPolicy ?? this.toolPolicy,
+      tui: tui ?? this.tui,
       environments: environments ?? this.environments,
     );
   }
@@ -123,6 +131,35 @@ class EnvironmentConfig {
       provider: provider ?? this.provider,
       gateway: gateway ?? this.gateway,
       toolPolicy: toolPolicy ?? this.toolPolicy,
+    );
+  }
+}
+
+class TuiConfig {
+  TuiConfig({
+    this.locale = TuiLocalePreference.auto,
+  });
+
+  final TuiLocalePreference locale;
+
+  factory TuiConfig.fromJson(Map<String, Object?> json) {
+    final rawLocale = _stringAt(json, 'locale');
+    return TuiConfig(
+      locale: rawLocale == null
+          ? TuiLocalePreference.auto
+          : parseTuiLocalePreference(rawLocale),
+    );
+  }
+
+  Map<String, Object?> toJson() => {
+        'locale': tuiLocalePreferenceToConfig(locale),
+      };
+
+  TuiConfig copyWith({
+    TuiLocalePreference? locale,
+  }) {
+    return TuiConfig(
+      locale: locale ?? this.locale,
     );
   }
 }

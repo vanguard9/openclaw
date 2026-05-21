@@ -3,6 +3,7 @@ import 'dart:io';
 
 import '../runtime/paths.dart';
 import '../tools/tool_policy.dart';
+import '../tui/tui_strings.dart';
 import 'app_config.dart';
 
 class ConfigStore {
@@ -176,6 +177,12 @@ class ConfigStore {
           throw FormatException('gateway.port must be a valid TCP port.');
         }
         return config.copyWith(gateway: config.gateway.copyWith(port: port));
+      case 'tui.locale':
+        return config.copyWith(
+          tui: config.tui.copyWith(
+            locale: parseTuiLocalePreference(rawValue),
+          ),
+        );
       default:
         throw ArgumentError('Unsupported config key: $path');
     }

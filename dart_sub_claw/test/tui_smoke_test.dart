@@ -152,6 +152,114 @@ if {$code != 0} { exit $code }
   );
 
   await _runExpect(
+    name: 'lang-switch-zh-cn',
+    script: r'''
+set timeout 8
+spawn dart run bin/dart_sub_claw.dart tui --session tui-lang-smoke --history 0
+after 1000
+expect "lang=en-US (English)"
+send "/lang zh-CN\r"
+expect "提示: 语言已切换到 zh-CN"
+expect "lang=zh-CN (中文)"
+send "/help\r"
+expect "TUI 帮助"
+expect "/status  显示状态"
+send "/exit\r"
+expect eof
+catch wait result
+set code [lindex $result 3]
+if {$code != 0} { exit $code }
+''',
+  );
+
+  await _runExpect(
+    name: 'slash-command-suggestions',
+    script: r'''
+set timeout 8
+spawn dart run bin/dart_sub_claw.dart tui --session tui-slash-suggest-smoke --history 0
+after 1000
+send "/"
+expect "Command suggestions"
+expect "/help"
+send "h"
+expect "/help  show help"
+send "\t"
+expect "you> /help"
+send "\r"
+expect "TUI help"
+expect "Ctrl-O expands tool details"
+send "/exit\r"
+expect eof
+catch wait result
+set code [lindex $result 3]
+if {$code != 0} { exit $code }
+''',
+  );
+
+  await _runExpect(
+    name: 'slash-lang-choice-panel',
+    script: r'''
+set timeout 8
+spawn dart run bin/dart_sub_claw.dart tui --session tui-lang-panel-smoke --history 0
+after 1000
+send "/lang "
+expect "Command suggestions"
+expect "auto"
+expect "zh-CN"
+send "\033\[B"
+send "\r"
+expect "提示: 语言已切换到 zh-CN"
+send "/exit\r"
+expect eof
+catch wait result
+set code [lindex $result 3]
+if {$code != 0} { exit $code }
+''',
+  );
+
+  await _runExpect(
+    name: 'slash-env-choice-panel',
+    setup: _writeEnvSuggestionConfig,
+    script: r'''
+set timeout 8
+spawn dart run bin/dart_sub_claw.dart tui --session tui-env-panel-smoke --history 0
+after 1000
+send "/env d"
+expect "Command suggestions"
+expect "dev  switch environment"
+send "\r"
+expect "notice: environment switched to dev"
+expect "env=dev"
+send "/exit\r"
+expect eof
+catch wait result
+set code [lindex $result 3]
+if {$code != 0} { exit $code }
+''',
+  );
+
+  await _runExpect(
+    name: 'slash-session-choice-panel',
+    setup: _writeSessionSuggestion,
+    script: r'''
+set timeout 8
+spawn dart run bin/dart_sub_claw.dart tui --session tui-session-panel-current --history 0
+after 1000
+send "/session tui-session-panel-t"
+expect "Command suggestions"
+expect "tui-session-panel-target"
+send "\r"
+expect "notice: session switched to tui-session-panel-target"
+expect "session=tui-session-panel-target"
+send "/exit\r"
+expect eof
+catch wait result
+set code [lindex $result 3]
+if {$code != 0} { exit $code }
+''',
+  );
+
+  await _runExpect(
     name: 'mouse-wheel-is-ignored',
     script: r'''
 set timeout 8
@@ -285,16 +393,45 @@ set timeout 12
 spawn dart run bin/dart_sub_claw.dart tui --session tui-tool-allow-smoke --history 0
 after 1000
 send "use shell\r"
-expect "status=需要授权: shell"
-expect "需要用户授权"
-expect "AI 已暂停，正在等待你的授权决定。"
-expect "参数: 已隐藏，按 Ctrl-O 展开详情"
-expect "choice> y 允许一次"
+expect "status=permission required: shell"
+expect "Permission required"
+expect "AI is paused and waiting for your permission."
+expect "arguments: hidden, press Ctrl-O for details"
+expect "choice> y allow once"
 send "\017"
 expect "printf tui-permission"
 send "y"
 expect "tool> shell completed"
-expect "tool detail> output: tui-permission"
+expect "output>"
+expect "tui-permission"
+expect "assistant> tool allowed final"
+send "/exit\r"
+expect eof
+catch wait result
+set code [lindex $result 3]
+if {$code != 0} { exit $code }
+''',
+    );
+
+    await _runExpect(
+      name: 'tool-failure-details',
+      setup: (home) => _writeProviderConfig(home, toolServer.port),
+      script: r'''
+set timeout 12
+spawn dart run bin/dart_sub_claw.dart tui --session tui-tool-failure-smoke --history 0
+after 1000
+send "fail shell\r"
+expect "Permission required"
+send "y"
+expect "tool> shell failed exit=7"
+send "\017"
+expect "arguments>"
+expect "exit 7"
+expect "output>"
+expect "stdout:"
+expect "tool-line-two"
+expect "stderr:"
+expect "tool-error"
 expect "assistant> tool allowed final"
 send "/exit\r"
 expect eof
@@ -312,10 +449,33 @@ set timeout 12
 spawn dart run bin/dart_sub_claw.dart tui --session tui-tool-deny-smoke --history 0
 after 1000
 send "use shell\r"
-expect "需要用户授权"
-expect "choice> y 允许一次"
+expect "Permission required"
+expect "choice> y allow once"
 send "n"
 expect "tool> shell denied"
+expect "assistant> tool denied final"
+send "/exit\r"
+expect eof
+catch wait result
+set code [lindex $result 3]
+if {$code != 0} { exit $code }
+''',
+    );
+
+    await _runExpect(
+      name: 'tool-permission-zh-cn',
+      setup: (home) => _writeProviderConfig(home, toolServer.port),
+      script: r'''
+set timeout 12
+spawn dart run bin/dart_sub_claw.dart tui --locale zh-CN --session tui-tool-zh-smoke --history 0
+after 1000
+send "use shell\r"
+expect "状态=需要授权: shell"
+expect "需要用户授权"
+expect "AI 已暂停，正在等待你的授权决定。"
+expect "choice> y 允许一次"
+send "n"
+expect "tool> shell 被拒绝"
 expect "assistant> tool denied final"
 send "/exit\r"
 expect eof
@@ -333,9 +493,9 @@ set timeout 12
 spawn sh -lc "stty rows 10 columns 50; exec dart run bin/dart_sub_claw.dart tui --session tui-tool-tight-smoke --history 0"
 after 1000
 send "use shell\r"
-expect "status=授权: shell"
-expect "需要用户授权"
-expect "choice> y 允许"
+expect "status=permission: shell"
+expect "Permission required"
+expect "choice> y allow"
 send "n"
 expect "tool> shell denied"
 expect "assistant> tool denied final"
@@ -355,8 +515,8 @@ set timeout 12
 spawn dart run bin/dart_sub_claw.dart tui --session tui-tool-remember-smoke --history 0
 after 1000
 send "use shell\r"
-expect "需要用户授权"
-expect "choice> y 允许一次"
+expect "Permission required"
+expect "choice> y allow once"
 send "a"
 expect "tool> shell completed"
 expect "assistant> tool allowed final"
@@ -398,6 +558,7 @@ Future<void> _runExpect({
       workingDirectory: Directory.current.path,
       environment: {
         'DART_SUB_CLAW_HOME': temp.path,
+        'DARTSUB_TUI_LOCALE': 'en-US',
       },
     );
     if (result.exitCode != 0) {
@@ -448,11 +609,14 @@ Future<HttpServer> _startToolSseServer() async {
       }
       final body = await utf8.decoder.bind(request).join();
       final isToolResult = body.contains('Tool result:');
+      final failingShell = body.contains('fail shell');
       final content = isToolResult
           ? body.contains('permission_denied')
               ? 'tool denied final'
               : 'tool allowed final'
-          : '我来执行。<tool_call>shell{"arguments":{"command":"printf tui-permission"},"tool":"shell"}';
+          : failingShell
+              ? '我来执行。<tool_call>shell{"arguments":{"command":"printf tool-line-one; echo; printf tool-line-two; printf tool-error >&2; exit 7"},"tool":"shell"}'
+              : '我来执行。<tool_call>shell{"arguments":{"command":"printf tui-permission"},"tool":"shell"}';
       response.headers.contentType =
           ContentType('text', 'event-stream', charset: 'utf-8');
       response.write(
@@ -475,6 +639,38 @@ Future<HttpServer> _startToolSseServer() async {
 
 Future<void> _writeSlowProviderConfig(Directory home, int port) async {
   await _writeProviderConfig(home, port);
+}
+
+Future<void> _writeEnvSuggestionConfig(Directory home) async {
+  await home.create(recursive: true);
+  final file = File('${home.path}${Platform.pathSeparator}config.json');
+  await file.writeAsString(
+    '${jsonEncode({
+          'environments': {
+            'dev': {
+              'provider': {
+                'model': 'dev-model',
+              },
+            },
+          },
+        })}\n',
+  );
+}
+
+Future<void> _writeSessionSuggestion(Directory home) async {
+  final sessionsDir =
+      Directory('${home.path}${Platform.pathSeparator}sessions');
+  await sessionsDir.create(recursive: true);
+  final file = File(
+    '${sessionsDir.path}${Platform.pathSeparator}tui-session-panel-target.jsonl',
+  );
+  await file.writeAsString(
+    '${jsonEncode({
+          'role': 'assistant',
+          'content': 'session panel target',
+          'createdAt': DateTime.utc(2026, 1, 1).toIso8601String(),
+        })}\n',
+  );
 }
 
 Future<void> _writeProviderConfig(

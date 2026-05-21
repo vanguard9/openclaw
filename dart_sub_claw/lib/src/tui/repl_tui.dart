@@ -13,6 +13,7 @@ import '../sessions/chat_message.dart';
 import '../sessions/session_store.dart';
 import '../tools/tool_policy.dart';
 import '../tools/tool_runtime.dart';
+import 'tui_strings.dart';
 
 const Object _copyUnset = Object();
 const int _maxInputHistory = 100;
@@ -64,12 +65,14 @@ class ReplTui {
     String sessionId = 'default',
     String? environment,
     int historyLimit = 12,
+    TuiLocalePreference? localeOverride,
     bool captureMouse = false,
     bool altScreen = false,
   }) async {
     final config = await configStore.ensureExists();
     final envName = normalizeEnvironmentName(environment);
     final history = await sessionStore.read(sessionId);
+    final knownSessionIds = await sessionStore.listSessionIds();
     late final Program program;
     late final AgentService service;
     program = Program(
@@ -104,6 +107,11 @@ class ReplTui {
         sessionId: sessionId,
         environment: envName,
         historyLimit: historyLimit,
+        localePreference: localeOverride ?? config.tui.locale,
+        knownSessionIds: {
+          sessionId,
+          ...knownSessionIds,
+        }.toList(),
         messages: _linesFromHistory(history, historyLimit),
         inputHistory: _inputHistoryFromMessages(history),
         send: program.send,
@@ -122,6 +130,8 @@ final class _ChatTuiModel extends TeaModel {
     required this.sessionId,
     required this.environment,
     required this.historyLimit,
+    required this.localePreference,
+    required this.knownSessionIds,
     required this.messages,
     required this.inputHistory,
     required this.send,
@@ -145,6 +155,9 @@ final class _ChatTuiModel extends TeaModel {
     this.activeCancellation,
     this.pendingToolPermission,
     this.lastCtrlCAt,
+    this.slashSelectionIndex = 0,
+    this.slashSuggestionsDismissed = false,
+    this.helpPanelVisible = false,
   })  : input = input ??
             TextInputModel(
               placeholder: _inputPlaceholder,
@@ -163,6 +176,8 @@ final class _ChatTuiModel extends TeaModel {
   final String sessionId;
   final String? environment;
   final int historyLimit;
+  final TuiLocalePreference localePreference;
+  final List<String> knownSessionIds;
   final List<_ChatLine> messages;
   final List<String> inputHistory;
   final void Function(Msg msg) send;
@@ -186,12 +201,19 @@ final class _ChatTuiModel extends TeaModel {
   final CancellationController? activeCancellation;
   final _PendingToolPermission? pendingToolPermission;
   final int? lastCtrlCAt;
+  final int slashSelectionIndex;
+  final bool slashSuggestionsDismissed;
+  final bool helpPanelVisible;
+
+  TuiStrings get strings => TuiStrings.resolve(localePreference);
 
   _ChatTuiModel copyWith({
     AppConfig? config,
     String? sessionId,
     String? environment,
     bool clearEnvironment = false,
+    TuiLocalePreference? localePreference,
+    List<String>? knownSessionIds,
     List<_ChatLine>? messages,
     List<String>? inputHistory,
     TextInputModel? input,
@@ -215,6 +237,9 @@ final class _ChatTuiModel extends TeaModel {
     Object? activeCancellation = _copyUnset,
     Object? pendingToolPermission = _copyUnset,
     int? lastCtrlCAt,
+    int? slashSelectionIndex,
+    bool? slashSuggestionsDismissed,
+    bool? helpPanelVisible,
   }) {
     return _ChatTuiModel(
       config: config ?? this.config,
@@ -224,6 +249,8 @@ final class _ChatTuiModel extends TeaModel {
       sessionId: sessionId ?? this.sessionId,
       environment: clearEnvironment ? null : environment ?? this.environment,
       historyLimit: historyLimit,
+      localePreference: localePreference ?? this.localePreference,
+      knownSessionIds: knownSessionIds ?? this.knownSessionIds,
       messages: messages ?? this.messages,
       inputHistory: inputHistory ?? this.inputHistory,
       send: send,
@@ -257,6 +284,10 @@ final class _ChatTuiModel extends TeaModel {
           ? this.pendingToolPermission
           : pendingToolPermission as _PendingToolPermission?,
       lastCtrlCAt: lastCtrlCAt ?? this.lastCtrlCAt,
+      slashSelectionIndex: slashSelectionIndex ?? this.slashSelectionIndex,
+      slashSuggestionsDismissed:
+          slashSuggestionsDismissed ?? this.slashSuggestionsDismissed,
+      helpPanelVisible: helpPanelVisible ?? this.helpPanelVisible,
     );
   }
 
@@ -333,7 +364,7 @@ final class _ChatTuiModel extends TeaModel {
           activity: _ActivityState.cancelled,
           activityStartedAt: null,
           activeAssistantText: '',
-          notice: 'run cancelled',
+          notice: strings.runCancelled,
           activeCancellation: null,
           pendingToolPermission: null,
         ),
@@ -348,7 +379,7 @@ final class _ChatTuiModel extends TeaModel {
           activity: _ActivityState.error,
           activityStartedAt: null,
           activeAssistantText: '',
-          notice: 'error: ${msg.message}',
+          notice: strings.error(msg.message),
           activeCancellation: null,
           pendingToolPermission: null,
         ),
@@ -374,10 +405,7 @@ final class _ChatTuiModel extends TeaModel {
     if (msg is _ToolStartedMsg) {
       final nextMessages = [
         ...messages,
-        _ChatLine.tool(
-          '${msg.call.tool} running',
-          detail: 'arguments: ${_oneLine(jsonEncode(msg.call.arguments))}',
-        ),
+        _ChatLine.tool(_ToolEvent.running(msg.call)),
       ];
       return (
         copyWith(
@@ -390,13 +418,7 @@ final class _ChatTuiModel extends TeaModel {
     }
 
     if (msg is _ToolFinishedMsg) {
-      final nextMessages = [
-        ...messages,
-        _ChatLine.tool(
-          _toolResultSummary(msg.result),
-          detail: _toolResultDetail(msg.result),
-        ),
-      ];
+      final nextMessages = _completeRunningTool(messages, msg.result);
       return (
         copyWith(
           messages: _trimLines(nextMessages, historyLimit),
@@ -417,8 +439,14 @@ final class _ChatTuiModel extends TeaModel {
           ignoredUnknownSequenceChars: 0,
           input: input.copyWith(value: '', cursorPos: 0),
           placeholderSuppressed: false,
-          notice: 'session switched to ${msg.sessionId}',
+          notice: strings.sessionSwitched(msg.sessionId),
           scrollOffset: 0,
+          knownSessionIds: {
+            msg.sessionId,
+            ...knownSessionIds,
+          }.toList(),
+          slashSelectionIndex: 0,
+          slashSuggestionsDismissed: false,
         ),
         null,
       );
@@ -491,6 +519,21 @@ final class _ChatTuiModel extends TeaModel {
       if (suppressed != null) {
         return (suppressed, null);
       }
+      final slashSuggestions = _slashSuggestions();
+      if (slashSuggestions.isNotEmpty) {
+        if (msg.key == 'up' && inputHistoryIndex == null) {
+          return (_moveSlashSelection(-1, slashSuggestions), null);
+        }
+        if (msg.key == 'down' && inputHistoryIndex == null) {
+          return (_moveSlashSelection(1, slashSuggestions), null);
+        }
+        if (msg.key == 'tab') {
+          return (_acceptSlashSuggestion(slashSuggestions), null);
+        }
+        if (msg.key == 'enter') {
+          return _submitOrAcceptSlashSuggestion(slashSuggestions);
+        }
+      }
       if (msg.key == 'up') {
         return (_showPreviousInputHistory(), null);
       }
@@ -514,6 +557,9 @@ final class _ChatTuiModel extends TeaModel {
           inputHistoryIndex: null,
           draftInput: '',
           ignoredUnknownSequenceChars: 0,
+          slashSelectionIndex: 0,
+          slashSuggestionsDismissed: false,
+          helpPanelVisible: false,
         ),
         null,
       );
@@ -528,6 +574,9 @@ final class _ChatTuiModel extends TeaModel {
           inputHistoryIndex: null,
           draftInput: '',
           ignoredUnknownSequenceChars: 0,
+          slashSelectionIndex: 0,
+          slashSuggestionsDismissed: false,
+          helpPanelVisible: false,
         ),
         null,
       );
@@ -546,7 +595,7 @@ final class _ChatTuiModel extends TeaModel {
           inputHistoryIndex: null,
           draftInput: '',
           ignoredUnknownSequenceChars: 0,
-          notice: 'cleared input; press ctrl+c again to exit',
+          notice: strings.clearedInput(),
           lastCtrlCAt: now,
         ),
         null,
@@ -559,7 +608,7 @@ final class _ChatTuiModel extends TeaModel {
 
     return (
       copyWith(
-        notice: 'press ctrl+c again to exit',
+        notice: strings.pressCtrlCToExit(),
         lastCtrlCAt: now,
       ),
       null,
@@ -570,13 +619,25 @@ final class _ChatTuiModel extends TeaModel {
     if (pendingToolPermission != null) {
       return _resolveToolPermission(ToolPermissionDecision.deny);
     }
+    if (_slashSuggestions().isNotEmpty) {
+      return (
+        copyWith(
+          slashSuggestionsDismissed: true,
+          slashSelectionIndex: 0,
+        ),
+        null,
+      );
+    }
+    if (helpPanelVisible) {
+      return (copyWith(helpPanelVisible: false), null);
+    }
     if (thinking && activeCancellation != null) {
       activeCancellation!.cancel();
       return (
         copyWith(
           activity: _ActivityState.cancelling,
           activityStartedAt: null,
-          notice: 'cancelling run...',
+          notice: strings.cancellingRun,
         ),
         null,
       );
@@ -589,7 +650,7 @@ final class _ChatTuiModel extends TeaModel {
     return (
       copyWith(
         toolDetailsExpanded: next,
-        notice: next ? 'tool details expanded' : 'tool details collapsed',
+        notice: strings.toolDetails(next),
       ),
       null,
     );
@@ -600,7 +661,7 @@ final class _ChatTuiModel extends TeaModel {
     return (
       copyWith(
         showThinking: next,
-        notice: next ? 'thinking display on' : 'thinking display off',
+        notice: strings.thinkingDisplay(next),
       ),
       null,
     );
@@ -622,7 +683,7 @@ final class _ChatTuiModel extends TeaModel {
       return _resolveToolPermission(ToolPermissionDecision.deny);
     }
     return (
-      copyWith(notice: '按 y 允许一次，按 a 本会话允许，按 n 拒绝'),
+      copyWith(notice: strings.invalidPermissionChoice()),
       null,
     );
   }
@@ -651,10 +712,10 @@ final class _ChatTuiModel extends TeaModel {
         activityStartedAt:
             thinking ? _activityStartedAt(_ActivityState.waiting) : null,
         notice: remember
-            ? 'allowed tool ${pending.request.tool} for this TUI session'
+            ? strings.allowedTool(pending.request.tool, forSession: true)
             : decision == ToolPermissionDecision.allow
-                ? 'allowed tool ${pending.request.tool}'
-                : 'denied tool ${pending.request.tool}',
+                ? strings.allowedTool(pending.request.tool, forSession: false)
+                : strings.deniedTool(pending.request.tool),
       ),
       null,
     );
@@ -679,9 +740,52 @@ final class _ChatTuiModel extends TeaModel {
         inputHistoryIndex: null,
         draftInput: '',
         ignoredUnknownSequenceChars: 0,
+        slashSelectionIndex: 0,
+        slashSuggestionsDismissed: false,
+        helpPanelVisible: false,
       ),
       null,
     );
+  }
+
+  _ChatTuiModel _moveSlashSelection(
+    int delta,
+    List<_SlashSuggestion> suggestions,
+  ) {
+    final selected = _selectedSlashSuggestionIndex(suggestions);
+    final next = (selected + delta).clamp(0, suggestions.length - 1).toInt();
+    return copyWith(slashSelectionIndex: next);
+  }
+
+  _ChatTuiModel _acceptSlashSuggestion(List<_SlashSuggestion> suggestions) {
+    final suggestion = suggestions[_selectedSlashSuggestionIndex(suggestions)];
+    return copyWith(
+      input: _inputWithValue(input, suggestion.completionValue),
+      inputHistoryIndex: null,
+      draftInput: '',
+      ignoredUnknownSequenceChars: 0,
+      placeholderSuppressed: true,
+      slashSelectionIndex: 0,
+      slashSuggestionsDismissed: false,
+    );
+  }
+
+  (Model, Cmd?) _submitOrAcceptSlashSuggestion(
+    List<_SlashSuggestion> suggestions,
+  ) {
+    final suggestion = suggestions[_selectedSlashSuggestionIndex(suggestions)];
+    if (suggestion.executeOnEnter) {
+      return _submitInput(_inputWithValue(input, suggestion.value));
+    }
+    final current = input.value.trim();
+    if (current == suggestion.value && !suggestion.requiresArgument) {
+      return _submitInput(input);
+    }
+    return (_acceptSlashSuggestion(suggestions), null);
+  }
+
+  int _selectedSlashSuggestionIndex(List<_SlashSuggestion> suggestions) {
+    return slashSelectionIndex.clamp(0, suggestions.length - 1).toInt();
   }
 
   (Model, Cmd?) _submitInput(TextInputModel sourceInput) {
@@ -698,6 +802,8 @@ final class _ChatTuiModel extends TeaModel {
         ignoredUnknownSequenceChars: 0,
         input: sourceInput,
         placeholderSuppressed: false,
+        slashSelectionIndex: 0,
+        slashSuggestionsDismissed: false,
       )._handleSlashCommand(value);
     }
     if (thinking) {
@@ -705,7 +811,7 @@ final class _ChatTuiModel extends TeaModel {
         copyWith(
           input: sourceInput,
           placeholderSuppressed: false,
-          notice: 'assistant is still responding; use /cancel or Esc',
+          notice: strings.assistantBusy,
         ),
         null,
       );
@@ -731,6 +837,9 @@ final class _ChatTuiModel extends TeaModel {
         activeAssistantText: '',
         activeCancellation: cancellation,
         clearNotice: true,
+        slashSelectionIndex: 0,
+        slashSuggestionsDismissed: false,
+        helpPanelVisible: false,
       ),
       _runAgentCommand(value, cancellation),
     );
@@ -750,6 +859,8 @@ final class _ChatTuiModel extends TeaModel {
       draftInput: nextDraft,
       placeholderSuppressed: true,
       ignoredUnknownSequenceChars: 0,
+      slashSelectionIndex: 0,
+      slashSuggestionsDismissed: false,
     );
   }
 
@@ -782,7 +893,7 @@ final class _ChatTuiModel extends TeaModel {
         inputView: inputView,
         compact: compactLayout,
         tight: tightLayout,
-        scrollText: 'scroll: latest',
+        scrollText: strings.scrollLatest(),
       );
     }
     final bodyHeight =
@@ -802,6 +913,8 @@ final class _ChatTuiModel extends TeaModel {
         draftInput: '',
         placeholderSuppressed: false,
         ignoredUnknownSequenceChars: 0,
+        slashSelectionIndex: 0,
+        slashSuggestionsDismissed: false,
       );
     }
     final nextIndex = index + 1;
@@ -810,6 +923,8 @@ final class _ChatTuiModel extends TeaModel {
       inputHistoryIndex: nextIndex,
       placeholderSuppressed: true,
       ignoredUnknownSequenceChars: 0,
+      slashSelectionIndex: 0,
+      slashSuggestionsDismissed: false,
     );
   }
 
@@ -833,6 +948,9 @@ final class _ChatTuiModel extends TeaModel {
       inputHistoryIndex: null,
       draftInput: '',
       ignoredUnknownSequenceChars: 0,
+      slashSelectionIndex: 0,
+      slashSuggestionsDismissed: false,
+      helpPanelVisible: false,
     );
   }
 
@@ -849,7 +967,7 @@ final class _ChatTuiModel extends TeaModel {
               placeholderSuppressed: false,
               activity: _ActivityState.cancelling,
               activityStartedAt: null,
-              notice: 'cancelling run...',
+              notice: strings.cancellingRun,
             ),
             null,
           );
@@ -858,7 +976,7 @@ final class _ChatTuiModel extends TeaModel {
           copyWith(
             input: input.copyWith(value: '', cursorPos: 0),
             placeholderSuppressed: false,
-            notice: 'no active run',
+            notice: strings.noActiveRun,
           ),
           null,
         );
@@ -870,8 +988,8 @@ final class _ChatTuiModel extends TeaModel {
           copyWith(
             input: input.copyWith(value: '', cursorPos: 0),
             placeholderSuppressed: false,
-            notice:
-                'commands: /help /status /history /session <id> /env <name|default> /clear /cancel /exit',
+            clearNotice: true,
+            helpPanelVisible: true,
           ),
           null,
         );
@@ -889,7 +1007,7 @@ final class _ChatTuiModel extends TeaModel {
           copyWith(
             input: input.copyWith(value: '', cursorPos: 0),
             placeholderSuppressed: false,
-            notice: '${messages.length} visible message(s)',
+            notice: strings.historyVisible(messages.length),
           ),
           null,
         );
@@ -900,7 +1018,7 @@ final class _ChatTuiModel extends TeaModel {
             placeholderSuppressed: false,
             messages: const [],
             activeAssistantText: '',
-            notice: 'screen cleared; session history kept',
+            notice: strings.screenCleared,
           ),
           null,
         );
@@ -910,7 +1028,7 @@ final class _ChatTuiModel extends TeaModel {
             copyWith(
               input: input.copyWith(value: '', cursorPos: 0),
               placeholderSuppressed: false,
-              notice: 'usage: /session <id>',
+              notice: strings.usageSession,
             ),
             null,
           );
@@ -929,7 +1047,7 @@ final class _ChatTuiModel extends TeaModel {
             copyWith(
               input: input.copyWith(value: '', cursorPos: 0),
               placeholderSuppressed: false,
-              notice: 'usage: /env <name|default>',
+              notice: strings.usageEnv,
             ),
             null,
           );
@@ -941,20 +1059,70 @@ final class _ChatTuiModel extends TeaModel {
             placeholderSuppressed: false,
             environment: nextEnv,
             clearEnvironment: nextEnv == null,
-            notice: 'environment switched to ${nextEnv ?? 'default'}',
+            notice: strings.environmentSwitched(nextEnv ?? 'default'),
           ),
           null,
+        );
+      case '/lang':
+        if (parts.length < 2 || parts[1].trim().isEmpty) {
+          return (
+            copyWith(
+              input: input.copyWith(value: '', cursorPos: 0),
+              placeholderSuppressed: false,
+              notice: strings.usageLang,
+            ),
+            null,
+          );
+        }
+        final TuiLocalePreference nextLocale;
+        try {
+          nextLocale = parseTuiLocalePreference(parts[1]);
+        } on FormatException {
+          return (
+            copyWith(
+              input: input.copyWith(value: '', cursorPos: 0),
+              placeholderSuppressed: false,
+              notice: strings.usageLang,
+            ),
+            null,
+          );
+        }
+        final nextConfig = config.copyWith(
+          tui: config.tui.copyWith(locale: nextLocale),
+        );
+        final nextStrings = TuiStrings.resolve(nextLocale);
+        final localeName = tuiLocalePreferenceToConfig(nextLocale);
+        return (
+          copyWith(
+            config: nextConfig,
+            localePreference: nextLocale,
+            input: input.copyWith(value: '', cursorPos: 0),
+            placeholderSuppressed: false,
+            notice: nextStrings.languageSwitched(localeName),
+          ),
+          _saveConfigCommand(nextConfig),
         );
       default:
         return (
           copyWith(
             input: input.copyWith(value: '', cursorPos: 0),
             placeholderSuppressed: false,
-            notice: 'unknown command: $command',
+            notice: strings.unknownCommand(command),
           ),
           null,
         );
     }
+  }
+
+  Cmd _saveConfigCommand(AppConfig nextConfig) {
+    return () async {
+      try {
+        await configStore.save(nextConfig);
+        return null;
+      } catch (error) {
+        return _AgentErrorMsg('$error');
+      }
+    };
   }
 
   Cmd _runAgentCommand(String value, CancellationController cancellation) {
@@ -1027,7 +1195,7 @@ final class _ChatTuiModel extends TeaModel {
         inputView: inputView,
         compact: compactLayout,
         tight: tightLayout,
-        scrollText: 'scroll: latest',
+        scrollText: strings.scrollLatest(),
       );
       bodyViewportHeight =
           _bodyViewportHeight(headerLines.length, footerLines.length);
@@ -1043,8 +1211,11 @@ final class _ChatTuiModel extends TeaModel {
         compact: compactLayout,
         tight: tightLayout,
         scrollText: effectiveScrollOffset > 0
-            ? 'scroll: $effectiveScrollOffset line(s) above latest'
-            : 'scroll: latest',
+            ? strings.scrollAbove(
+                effectiveScrollOffset,
+                compact: compactLayout,
+              )
+            : strings.scrollLatest(),
       );
     }
     final visibleEnd = bodyLines.length - effectiveScrollOffset;
@@ -1074,16 +1245,15 @@ final class _ChatTuiModel extends TeaModel {
     final gateway = envConfig.gateway;
     final toolPolicy = envConfig.toolPolicy;
     final elapsed = _elapsedStatus(activityStartedAt);
-    final activeDetail =
-        elapsed == null ? activity.label : '${activity.label} for $elapsed';
     final apiKeyConfigured =
         (provider.apiKey != null && provider.apiKey!.isNotEmpty) ||
             (Platform.environment[provider.apiKeyEnv]?.isNotEmpty ?? false);
     final sessionPolicyCount =
         toolPolicy.sessions[normalizeToolPolicySessionId(sessionId)]?.length ??
             0;
+    final activeDetail = strings.activity(activity.label, elapsed: elapsed);
     return [
-      'status:',
+      strings.statusHeading,
       'activity: $activeDetail',
       'environment: ${environment ?? 'default'}',
       'session: $sessionId',
@@ -1092,6 +1262,7 @@ final class _ChatTuiModel extends TeaModel {
       'baseUrl: ${provider.baseUrl}',
       'apiKey: ${apiKeyConfigured ? 'configured' : 'missing'} (${provider.apiKeyEnv})',
       'gateway: ${gateway.host}:${gateway.port}',
+      'tui.locale: ${tuiLocalePreferenceToConfig(localePreference)} (${strings.languageName})',
       'tool policy: ${toolPolicy.explicitDecisionCount} decision(s), $sessionPolicyCount for this session',
       'interactive permission: ask by default, ${sessionAllowedTools.length} allow(s) for this TUI session',
       'ui: thinking=${showThinking ? 'on' : 'off'}, toolDetails=${toolDetailsExpanded ? 'expanded' : 'collapsed'}',
@@ -1123,7 +1294,7 @@ final class _ChatTuiModel extends TeaModel {
   List<String> _buildBodyLines(int contentWidth) {
     final bodyLines = <String>[];
     if (messages.isEmpty && activeAssistantText.isEmpty) {
-      bodyLines.add('history: empty');
+      bodyLines.add(strings.historyEmpty);
       return bodyLines;
     }
     for (final message in messages) {
@@ -1132,6 +1303,7 @@ final class _ChatTuiModel extends TeaModel {
           message,
           contentWidth: contentWidth,
           expandToolDetails: toolDetailsExpanded,
+          strings: strings,
         ),
       );
     }
@@ -1144,31 +1316,38 @@ final class _ChatTuiModel extends TeaModel {
 
   List<String> _buildHeaderLines(int contentWidth, {required bool compact}) {
     final envConfig = config.resolveEnvironment(environment);
+    final contextLine =
+        'dartsub tui | env=${environment ?? 'default'} | session=$sessionId | lang=${_languageStatusLabel()}';
+    final modelLine =
+        'model=${envConfig.provider.model} | api=${_compactBaseUrl(envConfig.provider.baseUrl)}';
     if (compact) {
-      final context = _isTightLayout
-          ? 'env=${environment ?? 'default'} session=$sessionId'
-          : 'env=${environment ?? 'default'} model=${envConfig.provider.model} session=$sessionId';
       return [
-        ..._wrapLine('dartsub tui', contentWidth),
-        ..._wrapLine(context, contentWidth),
+        ..._wrapLine(contextLine, contentWidth),
+        if (!_isTightLayout) ..._wrapLine(modelLine, contentWidth),
         ..._wrapLine(_activityLine(compact: true), contentWidth),
         '',
       ];
     }
     return [
-      ..._wrapLine('dartsub tui', contentWidth),
-      ..._wrapLine(
-        'env=${environment ?? 'default'} model=${envConfig.provider.model} session=$sessionId',
-        contentWidth,
-      ),
+      ..._wrapLine(contextLine, contentWidth),
+      ..._wrapLine(modelLine, contentWidth),
       ..._wrapLine(_activityLine(), contentWidth),
-      ..._wrapLine('baseUrl=${envConfig.provider.baseUrl}', contentWidth),
-      ..._wrapLine(
-        'commands: /help /status /history /session <id> /env <name|default> /clear /cancel /exit',
-        contentWidth,
-      ),
+      ..._wrapLine(strings.helpHint, contentWidth),
       '',
     ];
+  }
+
+  String _languageStatusLabel() {
+    final preference = tuiLocalePreferenceToConfig(localePreference);
+    return '$preference (${strings.languageName})';
+  }
+
+  String _compactBaseUrl(String baseUrl) {
+    final uri = Uri.tryParse(baseUrl);
+    if (uri == null || uri.host.isEmpty) {
+      return baseUrl;
+    }
+    return uri.host;
   }
 
   List<String> _buildFooterLines(
@@ -1188,8 +1367,10 @@ final class _ChatTuiModel extends TeaModel {
         expanded: toolDetailsExpanded,
         compact: compact,
         tight: tight,
+        strings: strings,
       ));
     }
+    final slashSuggestions = _slashSuggestions();
     if (showThinking &&
         thinking &&
         activeAssistantText.isEmpty &&
@@ -1198,11 +1379,27 @@ final class _ChatTuiModel extends TeaModel {
     }
     if (notice != null && notice!.isNotEmpty) {
       lines.addAll(
-        _wrapLine('notice: $notice', contentWidth).map(_styleNoticeLine),
+        _wrapLine('${strings.noticePrefix}: $notice', contentWidth)
+            .map(_styleNoticeLine),
       );
     }
     if (scrollText != null) {
       lines.add(compact ? _compactScrollText(scrollText) : scrollText);
+    }
+    if (helpPanelVisible) {
+      lines.addAll(_helpPanel(
+        contentWidth: contentWidth,
+        compact: compact,
+        tight: tight,
+      ));
+    }
+    if (slashSuggestions.isNotEmpty) {
+      lines.addAll(_slashSuggestionPanel(
+        slashSuggestions,
+        contentWidth: contentWidth,
+        compact: compact,
+        tight: tight,
+      ));
     }
     lines.add(inputView.line);
     return lines;
@@ -1210,11 +1407,10 @@ final class _ChatTuiModel extends TeaModel {
 
   _InputRender _footerInputView(int contentWidth, {required bool compact}) {
     if (pendingToolPermission != null) {
-      final fullLine = compact
-          ? 'choice> y 允许 | a 本会话 | n 拒绝'
-          : 'choice> y 允许一次 | a 本会话允许 | n 拒绝';
-      final line =
-          _displayWidth(fullLine) <= contentWidth ? fullLine : 'choice> y/a/n';
+      final line = strings.choiceLine(
+        compact: compact,
+        contentWidth: contentWidth,
+      );
       return _InputRender(
         line: line,
         cursorX: _displayWidth('choice> '),
@@ -1224,6 +1420,186 @@ final class _ChatTuiModel extends TeaModel {
       input,
       contentWidth,
       showPlaceholder: input.value.isEmpty && !placeholderSuppressed,
+    );
+  }
+
+  List<_SlashSuggestion> _slashSuggestions() {
+    if (pendingToolPermission != null ||
+        slashSuggestionsDismissed ||
+        !input.value.startsWith('/')) {
+      return const [];
+    }
+    final raw = input.value;
+    final trimmedLeft = raw.trimLeft();
+    final argumentSuggestions = switch (_slashArgumentCommand(trimmedLeft)) {
+      '/lang' => _localeSlashSuggestions(_slashArgumentPrefix(trimmedLeft)),
+      '/env' => _environmentSlashSuggestions(_slashArgumentPrefix(trimmedLeft)),
+      '/session' => _sessionSlashSuggestions(_slashArgumentPrefix(trimmedLeft)),
+      _ => null,
+    };
+    if (argumentSuggestions != null) {
+      return argumentSuggestions;
+    }
+    if (trimmedLeft.contains(RegExp(r'\s'))) {
+      return const [];
+    }
+    final prefix = trimmedLeft.toLowerCase();
+    return [
+      for (final command in _slashCommands)
+        if (command.command.startsWith(prefix))
+          _SlashSuggestion(
+            value: command.command,
+            completionValue: command.requiresArgument
+                ? '${command.command} '
+                : command.command,
+            label: command.command,
+            description: strings.commandDescription(command.command),
+            requiresArgument: command.requiresArgument,
+          ),
+    ];
+  }
+
+  String? _slashArgumentCommand(String value) {
+    for (final command in const ['/lang', '/env', '/session']) {
+      if (value == command || value.startsWith('$command ')) {
+        return command;
+      }
+    }
+    return null;
+  }
+
+  String _slashArgumentPrefix(String value) {
+    final separator = value.indexOf(' ');
+    if (separator == -1) {
+      return '';
+    }
+    return value.substring(separator).trimLeft();
+  }
+
+  List<_SlashSuggestion> _localeSlashSuggestions(String prefix) {
+    final normalized = prefix.toLowerCase();
+    return [
+      for (final locale in const ['auto', 'zh-CN', 'en-US'])
+        if (locale.toLowerCase().startsWith(normalized))
+          _SlashSuggestion(
+            value: '/lang $locale',
+            completionValue: '/lang $locale',
+            label: locale,
+            description: strings.localeDescription(locale),
+            executeOnEnter: true,
+          ),
+    ];
+  }
+
+  List<_SlashSuggestion> _environmentSlashSuggestions(String prefix) {
+    final normalized = prefix.toLowerCase();
+    final environments = [
+      'default',
+      ...config.environments.keys,
+    ];
+    return [
+      for (final environment in environments)
+        if (environment.toLowerCase().startsWith(normalized))
+          _SlashSuggestion(
+            value: '/env $environment',
+            completionValue: '/env $environment',
+            label: environment,
+            description: strings.environmentDescription(environment),
+            executeOnEnter: true,
+          ),
+    ];
+  }
+
+  List<_SlashSuggestion> _sessionSlashSuggestions(String prefix) {
+    final normalized = prefix.toLowerCase();
+    return [
+      for (final knownSession in knownSessionIds)
+        if (knownSession.toLowerCase().startsWith(normalized))
+          _SlashSuggestion(
+            value: '/session $knownSession',
+            completionValue: '/session $knownSession',
+            label: knownSession,
+            description: strings.sessionDescription(
+              knownSession,
+              current: knownSession == sessionId,
+            ),
+            executeOnEnter: true,
+          ),
+    ];
+  }
+
+  List<String> _slashSuggestionPanel(
+    List<_SlashSuggestion> suggestions, {
+    required int contentWidth,
+    required bool compact,
+    required bool tight,
+  }) {
+    final selected = _selectedSlashSuggestionIndex(suggestions);
+    final maxItems = tight
+        ? 3
+        : compact
+            ? 4
+            : 6;
+    final start = (selected - maxItems + 1)
+        .clamp(0, (suggestions.length - maxItems).clamp(0, suggestions.length))
+        .toInt();
+    final visible = suggestions.skip(start).take(maxItems).toList();
+    final lines = <String>[
+      for (var i = 0; i < visible.length; i += 1)
+        _slashSuggestionLine(
+          visible[i],
+          selected: start + i == selected,
+          compact: compact,
+        ),
+      if (!tight) strings.slashPanelHint,
+    ];
+    return _boxedLines(
+      title: strings.slashPanelTitle,
+      lines: lines,
+      width: contentWidth,
+    );
+  }
+
+  String _slashSuggestionLine(
+    _SlashSuggestion suggestion, {
+    required bool selected,
+    required bool compact,
+  }) {
+    final marker = selected ? '>' : ' ';
+    if (compact || suggestion.description.isEmpty) {
+      return '$marker ${suggestion.label}';
+    }
+    return '$marker ${suggestion.label}  ${suggestion.description}';
+  }
+
+  List<String> _helpPanel({
+    required int contentWidth,
+    required bool compact,
+    required bool tight,
+  }) {
+    final commands = [
+      for (final command in _slashCommands)
+        '${command.command}${command.requiresArgument ? ' <value>' : ''}  ${strings.commandDescription(command.command)}',
+    ];
+    final lines = tight
+        ? [
+            ...commands.take(4),
+            strings.helpPanelShortcuts.last,
+          ]
+        : compact
+            ? [
+                ...commands.take(6),
+                ...strings.helpPanelShortcuts.take(3),
+              ]
+            : [
+                ...commands,
+                '',
+                ...strings.helpPanelShortcuts,
+              ];
+    return _boxedLines(
+      title: strings.helpPanelTitle,
+      lines: lines,
+      width: contentWidth,
     );
   }
 
@@ -1248,21 +1624,16 @@ final class _ChatTuiModel extends TeaModel {
   String _activityLine({bool compact = false}) {
     final pending = pendingToolPermission;
     if (pending != null) {
-      if (compact) {
-        return 'status=授权: ${pending.request.tool} | y/a/n';
-      }
-      return 'status=需要授权: ${pending.request.tool} | y 允许一次 | a 本会话允许 | n 拒绝';
+      return strings.permissionStatus(pending.request.tool, compact: compact);
     }
     final elapsed = _elapsedStatus(activityStartedAt);
-    final detail =
-        elapsed == null ? activity.label : '${activity.label} • $elapsed';
-    if (compact) {
-      final cancelHint = thinking ? ' | Esc cancels' : '';
-      return 'status=$detail$cancelHint';
-    }
-    final cancelHint = thinking ? ' | Esc cancels' : '';
-    final thinkingHint = showThinking ? 'thinking=on' : 'thinking=off';
-    return 'status=$detail | $thinkingHint$cancelHint';
+    final detail = strings.activity(activity.label, elapsed: elapsed);
+    return strings.statusLine(
+      detail,
+      thinkingVisible: showThinking,
+      thinking: thinking,
+      compact: compact,
+    );
   }
 }
 
@@ -1272,30 +1643,37 @@ List<String> _permissionPanel(
   required bool expanded,
   required bool compact,
   required bool tight,
+  required TuiStrings strings,
 }) {
   final args = _oneLine(jsonEncode(request.arguments));
   final body = tight
       ? <String>[
           if (expanded)
-            '参数: $args'
+            strings.args(args)
           else
-            '工具: ${request.tool} | 风险: ${request.risk.name}',
+            '${strings.toolLabel}: ${request.tool} | ${strings.riskLabel}: ${request.risk.name}',
         ]
       : compact
           ? <String>[
-              '工具: ${request.tool} | 风险: ${request.risk.name}',
-              if (expanded) '参数: $args' else 'Ctrl-O 展开参数',
-              'y 允许一次 | a 本会话允许 | n 拒绝',
+              '${strings.toolLabel}: ${request.tool} | ${strings.riskLabel}: ${request.risk.name}',
+              if (expanded)
+                strings.args(args)
+              else
+                strings.hiddenArgs(compact: true),
+              strings.compactPermissionChoices,
             ]
           : <String>[
-              'AI 已暂停，正在等待你的授权决定。',
-              '工具: ${request.tool}',
-              '风险级别: ${request.risk.name}',
-              if (expanded) '参数: $args' else '参数: 已隐藏，按 Ctrl-O 展开详情',
-              '按 y 允许一次，按 a 本会话允许，按 n 拒绝。',
+              strings.permissionPaused,
+              '${strings.toolLabel}: ${request.tool}',
+              '${strings.riskLabel}: ${request.risk.name}',
+              if (expanded)
+                strings.args(args)
+              else
+                strings.hiddenArgs(compact: false),
+              strings.permissionChoices,
             ];
   return _boxedLines(
-    title: '需要用户授权',
+    title: strings.permissionTitle,
     lines: body,
     width: contentWidth,
   );
@@ -1307,26 +1685,6 @@ String _compactScrollText(String scrollText) {
     return 'scroll: +${match.group(1)}';
   }
   return scrollText;
-}
-
-String _toolResultSummary(ToolResult result) {
-  if (result.code == 'permission_denied') {
-    return '${result.tool} denied';
-  }
-  final status = result.ok ? 'completed' : 'failed';
-  final exit = result.exitCode == null ? '' : ' exit=${result.exitCode}';
-  return '${result.tool} $status$exit';
-}
-
-String? _toolResultDetail(ToolResult result) {
-  final output = _oneLine(result.output);
-  if (output.isEmpty) {
-    return null;
-  }
-  if (result.code == 'permission_denied') {
-    return 'reason: $output';
-  }
-  return 'output: $output';
 }
 
 List<String> _boxedLines({
@@ -1374,6 +1732,7 @@ List<String> _renderChatLine(
   _ChatLine message, {
   required int contentWidth,
   required bool expandToolDetails,
+  required TuiStrings strings,
 }) {
   switch (message.kind) {
     case _ChatLineKind.user:
@@ -1384,18 +1743,88 @@ List<String> _renderChatLine(
     case _ChatLineKind.assistant:
       return _wrapLine('assistant> ${message.content}', contentWidth);
     case _ChatLineKind.tool:
-      final lines = <String>[
-        for (final line in _wrapLine('tool> ${message.content}', contentWidth))
-          _styleToolLine(line),
-      ];
-      final detail = message.detail;
-      if (expandToolDetails && detail != null && detail.isNotEmpty) {
-        lines.addAll(
-          _wrapLine('tool detail> $detail', contentWidth).map(_styleToolLine),
-        );
-      }
-      return lines;
+      return _renderToolEvent(
+        message.tool!,
+        contentWidth: contentWidth,
+        expandDetails: expandToolDetails,
+        strings: strings,
+      );
   }
+}
+
+List<String> _renderToolEvent(
+  _ToolEvent event, {
+  required int contentWidth,
+  required bool expandDetails,
+  required TuiStrings strings,
+}) {
+  final lines = <String>[
+    for (final line in _wrapLine(event.summary(strings), contentWidth))
+      _styleToolLine(line),
+  ];
+  if (!expandDetails) {
+    return lines;
+  }
+  for (final section in event.detailSections(strings)) {
+    lines.addAll(
+      _renderToolDetailSection(
+        section,
+        contentWidth: contentWidth,
+      ).map(_styleToolLine),
+    );
+  }
+  return lines;
+}
+
+List<String> _renderToolDetailSection(
+  _ToolDetailSection section, {
+  required int contentWidth,
+}) {
+  const detailIndent = '  ';
+  const valueIndent = '    ';
+  final value = section.value.trimRight();
+  return [
+    ..._wrapLine('$detailIndent${section.label}>', contentWidth),
+    if (value.isEmpty)
+      valueIndent
+    else
+      ..._wrapIndentedBlock(
+        value,
+        contentWidth: contentWidth,
+        indent: valueIndent,
+      ),
+  ];
+}
+
+List<String> _wrapIndentedBlock(
+  String value, {
+  required int contentWidth,
+  required String indent,
+}) {
+  final indentWidth = _displayWidth(indent);
+  final valueWidth = (contentWidth - indentWidth).clamp(1, 200).toInt();
+  return [
+    for (final line in _wrapLine(value, valueWidth)) '$indent$line',
+  ];
+}
+
+List<_ChatLine> _completeRunningTool(
+  List<_ChatLine> messages,
+  ToolResult result,
+) {
+  final nextMessages = [...messages];
+  for (var i = nextMessages.length - 1; i >= 0; i -= 1) {
+    final line = nextMessages[i];
+    final event = line.tool;
+    if (event != null &&
+        event.status == _ToolEventStatus.running &&
+        event.tool == result.tool) {
+      nextMessages[i] = _ChatLine.tool(event.complete(result));
+      return nextMessages;
+    }
+  }
+  nextMessages.add(_ChatLine.tool(_ToolEvent.fromResult(result)));
+  return nextMessages;
 }
 
 List<Directory> _defaultWritableRoots() {
@@ -1693,10 +2122,48 @@ TextInputModel _inputWithValue(TextInputModel input, String value) {
   return input.copyWith(value: value, cursorPos: value.characters.length);
 }
 
+final class _SlashCommand {
+  const _SlashCommand(this.command, {this.requiresArgument = false});
+
+  final String command;
+  final bool requiresArgument;
+}
+
+const List<_SlashCommand> _slashCommands = [
+  _SlashCommand('/help'),
+  _SlashCommand('/status'),
+  _SlashCommand('/history'),
+  _SlashCommand('/session', requiresArgument: true),
+  _SlashCommand('/env', requiresArgument: true),
+  _SlashCommand('/lang', requiresArgument: true),
+  _SlashCommand('/clear'),
+  _SlashCommand('/cancel'),
+  _SlashCommand('/exit'),
+  _SlashCommand('/quit'),
+];
+
+final class _SlashSuggestion {
+  const _SlashSuggestion({
+    required this.value,
+    required this.completionValue,
+    required this.label,
+    required this.description,
+    this.requiresArgument = false,
+    this.executeOnEnter = false,
+  });
+
+  final String value;
+  final String completionValue;
+  final String label;
+  final String description;
+  final bool requiresArgument;
+  final bool executeOnEnter;
+}
+
 enum _ChatLineKind { user, assistant, tool }
 
 final class _ChatLine {
-  _ChatLine(this.kind, this.content, {this.detail});
+  _ChatLine(this.kind, this.content, {this.tool});
 
   factory _ChatLine.user(String content) =>
       _ChatLine(_ChatLineKind.user, content);
@@ -1704,12 +2171,101 @@ final class _ChatLine {
   factory _ChatLine.assistant(String content) =>
       _ChatLine(_ChatLineKind.assistant, content);
 
-  factory _ChatLine.tool(String content, {String? detail}) =>
-      _ChatLine(_ChatLineKind.tool, content, detail: detail);
+  factory _ChatLine.tool(_ToolEvent tool) =>
+      _ChatLine(_ChatLineKind.tool, '', tool: tool);
 
   final _ChatLineKind kind;
   final String content;
-  final String? detail;
+  final _ToolEvent? tool;
+}
+
+enum _ToolEventStatus { running, completed, failed, denied }
+
+final class _ToolDetailSection {
+  _ToolDetailSection(this.label, this.value);
+
+  final String label;
+  final String value;
+}
+
+final class _ToolEvent {
+  _ToolEvent({
+    required this.tool,
+    required this.arguments,
+    required this.status,
+    this.output,
+    this.exitCode,
+  });
+
+  factory _ToolEvent.running(ToolCall call) {
+    return _ToolEvent(
+      tool: call.tool,
+      arguments: call.arguments,
+      status: _ToolEventStatus.running,
+    );
+  }
+
+  factory _ToolEvent.fromResult(ToolResult result) {
+    return _ToolEvent(
+      tool: result.tool,
+      arguments: const {},
+      status: _statusForResult(result),
+      output: result.output,
+      exitCode: result.exitCode,
+    );
+  }
+
+  final String tool;
+  final Map<String, Object?> arguments;
+  final _ToolEventStatus status;
+  final String? output;
+  final int? exitCode;
+
+  _ToolEvent complete(ToolResult result) {
+    return _ToolEvent(
+      tool: result.tool,
+      arguments: arguments,
+      status: _statusForResult(result),
+      output: result.output,
+      exitCode: result.exitCode,
+    );
+  }
+
+  String summary(TuiStrings strings) {
+    final exit = exitCode == null ? '' : ' exit=$exitCode';
+    return 'tool> $tool ${strings.toolStatus(status.name)}$exit';
+  }
+
+  List<_ToolDetailSection> detailSections(TuiStrings strings) {
+    final sections = <_ToolDetailSection>[
+      if (arguments.isNotEmpty)
+        _ToolDetailSection(strings.toolArgumentsLabel, jsonEncode(arguments)),
+      if (status == _ToolEventStatus.denied)
+        _ToolDetailSection(
+          strings.toolPermissionLabel,
+          strings.toolDeniedByUser,
+        ),
+    ];
+    final resultOutput = output?.trimRight() ?? '';
+    if (resultOutput.isNotEmpty) {
+      sections.add(
+        _ToolDetailSection(
+          status == _ToolEventStatus.denied
+              ? strings.toolReasonLabel
+              : strings.toolOutputLabel,
+          resultOutput,
+        ),
+      );
+    }
+    return sections;
+  }
+
+  static _ToolEventStatus _statusForResult(ToolResult result) {
+    if (result.code == 'permission_denied') {
+      return _ToolEventStatus.denied;
+    }
+    return result.ok ? _ToolEventStatus.completed : _ToolEventStatus.failed;
+  }
 }
 
 final class _AgentDeltaMsg extends Msg {

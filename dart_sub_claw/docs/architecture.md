@@ -71,6 +71,7 @@ graph LR
 - `/history`
 - `/session <id>`
 - `/env <name|default>`
+- `/lang <auto|zh-CN|en-US>`
 - `/clear`
 - `/cancel`
 - `/exit`

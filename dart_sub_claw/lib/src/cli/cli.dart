@@ -6,6 +6,7 @@ import '../config/config_store.dart';
 import '../doctor/doctor.dart';
 import '../gateway/gateway_server.dart';
 import '../tui/repl_tui.dart';
+import '../tui/tui_strings.dart';
 
 Future<int> runCli(
   List<String> args, {
@@ -65,6 +66,8 @@ Future<int> _runTui(List<String> args, IOSink out) async {
       Platform.environment['DARTSUB_ENV'];
   final sessionId = _optionValue(args, '--session') ?? 'default';
   final historyRaw = _optionValue(args, '--history');
+  final localeRaw = _optionValue(args, '--locale') ??
+      Platform.environment['DARTSUB_TUI_LOCALE'];
   final captureMouse = args.contains('--mouse');
   final altScreen = args.contains('--alt-screen');
   final historyLimit = historyRaw == null ? 12 : int.tryParse(historyRaw);
@@ -72,10 +75,13 @@ Future<int> _runTui(List<String> args, IOSink out) async {
     out.writeln('--history must be a non-negative number');
     return 64;
   }
+  final localeOverride =
+      localeRaw == null ? null : parseTuiLocalePreference(localeRaw);
   return ReplTui().run(
     sessionId: sessionId,
     environment: environment,
     historyLimit: historyLimit,
+    localeOverride: localeOverride,
     captureMouse: captureMouse,
     altScreen: altScreen,
   );
@@ -193,13 +199,12 @@ Commands:
   agent [--env <name>] --message <text> [--session <id>] Run one agent turn
   gateway run [--env <name>] [--host <host>] [--port <port>]
                                                        Start local HTTP/WebSocket gateway
-  tui [--env <name>] [--session <id>] [--history <n>] [--mouse] [--alt-screen]
+  tui [--env <name>] [--session <id>] [--history <n>] [--locale <auto|zh-CN|en-US>] [--mouse] [--alt-screen]
                                                        Start terminal chat
   doctor [--env <name>] [--skip-model]                 Check config and runtime health
   config [--env <name>] list                          Show config
   config [--env <name>] get <key>                     Read config value
   config [--env <name>] set <key> <value>             Write config value
-
 Useful config keys:
   provider.baseUrl
   provider.model
@@ -210,6 +215,7 @@ Useful config keys:
   provider.retryBackoffMs
   gateway.host
   gateway.port
+  tui.locale                                  auto | zh-CN | en-US
   toolPolicy.tools.<tool>                  ask | allow | deny
   toolPolicy.sessions.<session>.<tool>     ask | allow | deny
 ''');
