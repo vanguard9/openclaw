@@ -294,6 +294,7 @@ send "\017"
 expect "printf tui-permission"
 send "y"
 expect "tool> shell completed"
+expect "tool detail> output: tui-permission"
 expect "assistant> tool allowed final"
 send "/exit\r"
 expect eof
@@ -313,6 +314,28 @@ after 1000
 send "use shell\r"
 expect "需要用户授权"
 expect "choice> y 允许一次"
+send "n"
+expect "tool> shell denied"
+expect "assistant> tool denied final"
+send "/exit\r"
+expect eof
+catch wait result
+set code [lindex $result 3]
+if {$code != 0} { exit $code }
+''',
+    );
+
+    await _runExpect(
+      name: 'tool-permission-tight-terminal',
+      setup: (home) => _writeProviderConfig(home, toolServer.port),
+      script: r'''
+set timeout 12
+spawn sh -lc "stty rows 10 columns 50; exec dart run bin/dart_sub_claw.dart tui --session tui-tool-tight-smoke --history 0"
+after 1000
+send "use shell\r"
+expect "status=授权: shell"
+expect "需要用户授权"
+expect "choice> y 允许"
 send "n"
 expect "tool> shell denied"
 expect "assistant> tool denied final"

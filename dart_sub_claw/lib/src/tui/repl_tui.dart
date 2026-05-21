@@ -17,6 +17,10 @@ import '../tools/tool_runtime.dart';
 const Object _copyUnset = Object();
 const int _maxInputHistory = 100;
 const String _inputPlaceholder = '';
+const String _ansiReset = '\x1b[0m';
+const String _userMessageStyle = '\x1b[48;2;49;50;68m\x1b[38;2;236;239;244m';
+const String _toolMessageStyle = '\x1b[38;2;148;163;184m';
+const String _noticeStyle = '\x1b[38;2;251;191;36m';
 
 enum _ActivityState {
   idle('idle'),
@@ -370,7 +374,10 @@ final class _ChatTuiModel extends TeaModel {
     if (msg is _ToolStartedMsg) {
       final nextMessages = [
         ...messages,
-        _ChatLine.tool('${msg.call.tool} running'),
+        _ChatLine.tool(
+          '${msg.call.tool} running',
+          detail: 'arguments: ${_oneLine(jsonEncode(msg.call.arguments))}',
+        ),
       ];
       return (
         copyWith(
@@ -385,7 +392,10 @@ final class _ChatTuiModel extends TeaModel {
     if (msg is _ToolFinishedMsg) {
       final nextMessages = [
         ...messages,
-        _ChatLine.tool(_toolResultLine(msg.result)),
+        _ChatLine.tool(
+          _toolResultSummary(msg.result),
+          detail: _toolResultDetail(msg.result),
+        ),
       ];
       return (
         copyWith(
@@ -750,11 +760,34 @@ final class _ChatTuiModel extends TeaModel {
   }
 
   int get _maxScrollOffset {
-    final contentWidth = (width - 2).clamp(40, 200);
-    final maxBodyLines =
-        _maxBodyLinesForHeight(height, notice, thinking, activeAssistantText);
+    final contentWidth = (width - 2).clamp(20, 200).toInt();
     final bodyLineCount = _buildBodyLines(contentWidth).length;
-    return (bodyLineCount - maxBodyLines).clamp(0, 1000000).toInt();
+    final compactLayout = _isCompactLayout;
+    final tightLayout = _isTightLayout;
+    final headerLines = _buildHeaderLines(contentWidth, compact: compactLayout);
+    final inputView = _footerInputView(contentWidth, compact: compactLayout);
+    var footerLines = _buildFooterLines(
+      contentWidth,
+      inputView: inputView,
+      compact: compactLayout,
+      tight: tightLayout,
+    );
+    final bodyHeightWithoutScroll =
+        _bodyViewportHeight(headerLines.length, footerLines.length);
+    final showScrollStatus =
+        bodyLineCount > bodyHeightWithoutScroll || scrollOffset > 0;
+    if (showScrollStatus) {
+      footerLines = _buildFooterLines(
+        contentWidth,
+        inputView: inputView,
+        compact: compactLayout,
+        tight: tightLayout,
+        scrollText: 'scroll: latest',
+      );
+    }
+    final bodyHeight =
+        _bodyViewportHeight(headerLines.length, footerLines.length);
+    return (bodyLineCount - bodyHeight).clamp(0, 1000000).toInt();
   }
 
   _ChatTuiModel _showNextInputHistory() {
@@ -972,68 +1005,62 @@ final class _ChatTuiModel extends TeaModel {
 
   @override
   View view() {
-    final envConfig = config.resolveEnvironment(environment);
-    final contentWidth = (width - 2).clamp(40, 200);
-    final lines = <String>[
-      ..._wrapLine('dartsub tui', contentWidth),
-      ..._wrapLine(
-        'env=${environment ?? 'default'} model=${envConfig.provider.model} session=$sessionId',
-        contentWidth,
-      ),
-      ..._wrapLine(_activityLine(), contentWidth),
-      ..._wrapLine('baseUrl=${envConfig.provider.baseUrl}', contentWidth),
-      ..._wrapLine(
-        'commands: /help /status /history /session <id> /env <name|default> /clear /cancel /exit',
-        contentWidth,
-      ),
-      '',
-    ];
-
+    final contentWidth = (width - 2).clamp(20, 200).toInt();
+    final compactLayout = _isCompactLayout;
+    final tightLayout = _isTightLayout;
+    final headerLines = _buildHeaderLines(contentWidth, compact: compactLayout);
     final bodyLines = _buildBodyLines(contentWidth);
-    final maxBodyLines =
-        _maxBodyLinesForHeight(height, notice, thinking, activeAssistantText);
+    final inputView = _footerInputView(contentWidth, compact: compactLayout);
+    var footerLines = _buildFooterLines(
+      contentWidth,
+      inputView: inputView,
+      compact: compactLayout,
+      tight: tightLayout,
+    );
+    var bodyViewportHeight =
+        _bodyViewportHeight(headerLines.length, footerLines.length);
+    final showScrollStatus =
+        bodyLines.length > bodyViewportHeight || scrollOffset > 0;
+    if (showScrollStatus) {
+      footerLines = _buildFooterLines(
+        contentWidth,
+        inputView: inputView,
+        compact: compactLayout,
+        tight: tightLayout,
+        scrollText: 'scroll: latest',
+      );
+      bodyViewportHeight =
+          _bodyViewportHeight(headerLines.length, footerLines.length);
+    }
     final maxScrollOffset =
-        (bodyLines.length - maxBodyLines).clamp(0, 1000000).toInt();
+        (bodyLines.length - bodyViewportHeight).clamp(0, 1000000).toInt();
     final effectiveScrollOffset =
         scrollOffset.clamp(0, maxScrollOffset).toInt();
-    final visibleEnd = bodyLines.length - effectiveScrollOffset;
-    final visibleStart = (visibleEnd - maxBodyLines).clamp(0, bodyLines.length);
-    lines.addAll(bodyLines.sublist(visibleStart, visibleEnd));
-
-    lines.add('');
-    if (pendingToolPermission != null) {
-      lines.addAll(_permissionPanel(
-        pendingToolPermission!.request,
-        contentWidth: contentWidth,
-        expanded: toolDetailsExpanded,
-      ));
-    }
-    if (showThinking &&
-        thinking &&
-        activeAssistantText.isEmpty &&
-        pendingToolPermission == null) {
-      lines.add(spinner.view().content);
-    }
-    if (notice != null && notice!.isNotEmpty) {
-      lines.addAll(_wrapLine('notice: $notice', contentWidth));
-    }
-    if (effectiveScrollOffset > 0) {
-      lines.add('scroll: $effectiveScrollOffset line(s) above latest');
-    }
-    final _InputRender inputView;
-    if (pendingToolPermission != null) {
-      inputView = _InputRender(
-        line: 'choice> y 允许一次 | a 本会话允许 | n 拒绝',
-        cursorX: _displayWidth('choice> '),
-      );
-    } else {
-      inputView = _renderInput(
-        input,
+    if (showScrollStatus) {
+      footerLines = _buildFooterLines(
         contentWidth,
-        showPlaceholder: input.value.isEmpty && !placeholderSuppressed,
+        inputView: inputView,
+        compact: compactLayout,
+        tight: tightLayout,
+        scrollText: effectiveScrollOffset > 0
+            ? 'scroll: $effectiveScrollOffset line(s) above latest'
+            : 'scroll: latest',
       );
     }
-    lines.add(inputView.line);
+    final visibleEnd = bodyLines.length - effectiveScrollOffset;
+    final visibleStart =
+        (visibleEnd - bodyViewportHeight).clamp(0, bodyLines.length);
+    final visibleBodyLines = [
+      ...bodyLines.sublist(visibleStart, visibleEnd),
+    ];
+    while (visibleBodyLines.length < bodyViewportHeight) {
+      visibleBodyLines.add('');
+    }
+    final lines = <String>[
+      ...headerLines,
+      ...visibleBodyLines,
+      ...footerLines,
+    ];
 
     final view = newView(lines.join('\n'));
     view.cursor =
@@ -1101,7 +1128,11 @@ final class _ChatTuiModel extends TeaModel {
     }
     for (final message in messages) {
       bodyLines.addAll(
-        _wrapLine('${message.label}> ${message.content}', contentWidth),
+        _renderChatLine(
+          message,
+          contentWidth: contentWidth,
+          expandToolDetails: toolDetailsExpanded,
+        ),
       );
     }
     if (activeAssistantText.isNotEmpty) {
@@ -1110,6 +1141,99 @@ final class _ChatTuiModel extends TeaModel {
     }
     return bodyLines;
   }
+
+  List<String> _buildHeaderLines(int contentWidth, {required bool compact}) {
+    final envConfig = config.resolveEnvironment(environment);
+    if (compact) {
+      final context = _isTightLayout
+          ? 'env=${environment ?? 'default'} session=$sessionId'
+          : 'env=${environment ?? 'default'} model=${envConfig.provider.model} session=$sessionId';
+      return [
+        ..._wrapLine('dartsub tui', contentWidth),
+        ..._wrapLine(context, contentWidth),
+        ..._wrapLine(_activityLine(compact: true), contentWidth),
+        '',
+      ];
+    }
+    return [
+      ..._wrapLine('dartsub tui', contentWidth),
+      ..._wrapLine(
+        'env=${environment ?? 'default'} model=${envConfig.provider.model} session=$sessionId',
+        contentWidth,
+      ),
+      ..._wrapLine(_activityLine(), contentWidth),
+      ..._wrapLine('baseUrl=${envConfig.provider.baseUrl}', contentWidth),
+      ..._wrapLine(
+        'commands: /help /status /history /session <id> /env <name|default> /clear /cancel /exit',
+        contentWidth,
+      ),
+      '',
+    ];
+  }
+
+  List<String> _buildFooterLines(
+    int contentWidth, {
+    required _InputRender inputView,
+    required bool compact,
+    required bool tight,
+    String? scrollText,
+  }) {
+    final lines = <String>[
+      if (!tight) '',
+    ];
+    if (pendingToolPermission != null) {
+      lines.addAll(_permissionPanel(
+        pendingToolPermission!.request,
+        contentWidth: contentWidth,
+        expanded: toolDetailsExpanded,
+        compact: compact,
+        tight: tight,
+      ));
+    }
+    if (showThinking &&
+        thinking &&
+        activeAssistantText.isEmpty &&
+        pendingToolPermission == null) {
+      lines.add(spinner.view().content);
+    }
+    if (notice != null && notice!.isNotEmpty) {
+      lines.addAll(
+        _wrapLine('notice: $notice', contentWidth).map(_styleNoticeLine),
+      );
+    }
+    if (scrollText != null) {
+      lines.add(compact ? _compactScrollText(scrollText) : scrollText);
+    }
+    lines.add(inputView.line);
+    return lines;
+  }
+
+  _InputRender _footerInputView(int contentWidth, {required bool compact}) {
+    if (pendingToolPermission != null) {
+      final fullLine = compact
+          ? 'choice> y 允许 | a 本会话 | n 拒绝'
+          : 'choice> y 允许一次 | a 本会话允许 | n 拒绝';
+      final line =
+          _displayWidth(fullLine) <= contentWidth ? fullLine : 'choice> y/a/n';
+      return _InputRender(
+        line: line,
+        cursorX: _displayWidth('choice> '),
+      );
+    }
+    return _renderInput(
+      input,
+      contentWidth,
+      showPlaceholder: input.value.isEmpty && !placeholderSuppressed,
+    );
+  }
+
+  int _bodyViewportHeight(int headerLineCount, int footerLineCount) {
+    return (height - headerLineCount - footerLineCount).clamp(1, 200).toInt();
+  }
+
+  bool get _isCompactLayout => height <= 18 || width <= 72;
+
+  bool get _isTightLayout => height <= 12 || width <= 52;
 
   int? _activityStartedAt(_ActivityState next) {
     if (!next.isActive) {
@@ -1121,14 +1245,21 @@ final class _ChatTuiModel extends TeaModel {
     return DateTime.now().millisecondsSinceEpoch;
   }
 
-  String _activityLine() {
+  String _activityLine({bool compact = false}) {
     final pending = pendingToolPermission;
     if (pending != null) {
+      if (compact) {
+        return 'status=授权: ${pending.request.tool} | y/a/n';
+      }
       return 'status=需要授权: ${pending.request.tool} | y 允许一次 | a 本会话允许 | n 拒绝';
     }
     final elapsed = _elapsedStatus(activityStartedAt);
     final detail =
         elapsed == null ? activity.label : '${activity.label} • $elapsed';
+    if (compact) {
+      final cancelHint = thinking ? ' | Esc cancels' : '';
+      return 'status=$detail$cancelHint';
+    }
     final cancelHint = thinking ? ' | Esc cancels' : '';
     final thinkingHint = showThinking ? 'thinking=on' : 'thinking=off';
     return 'status=$detail | $thinkingHint$cancelHint';
@@ -1139,15 +1270,30 @@ List<String> _permissionPanel(
   ToolPermissionRequest request, {
   required int contentWidth,
   required bool expanded,
+  required bool compact,
+  required bool tight,
 }) {
   final args = _oneLine(jsonEncode(request.arguments));
-  final body = <String>[
-    'AI 已暂停，正在等待你的授权决定。',
-    '工具: ${request.tool}',
-    '风险级别: ${request.risk.name}',
-    if (expanded) '参数: $args' else '参数: 已隐藏，按 Ctrl-O 展开详情',
-    '按 y 允许一次，按 a 本会话允许，按 n 拒绝。',
-  ];
+  final body = tight
+      ? <String>[
+          if (expanded)
+            '参数: $args'
+          else
+            '工具: ${request.tool} | 风险: ${request.risk.name}',
+        ]
+      : compact
+          ? <String>[
+              '工具: ${request.tool} | 风险: ${request.risk.name}',
+              if (expanded) '参数: $args' else 'Ctrl-O 展开参数',
+              'y 允许一次 | a 本会话允许 | n 拒绝',
+            ]
+          : <String>[
+              'AI 已暂停，正在等待你的授权决定。',
+              '工具: ${request.tool}',
+              '风险级别: ${request.risk.name}',
+              if (expanded) '参数: $args' else '参数: 已隐藏，按 Ctrl-O 展开详情',
+              '按 y 允许一次，按 a 本会话允许，按 n 拒绝。',
+            ];
   return _boxedLines(
     title: '需要用户授权',
     lines: body,
@@ -1155,17 +1301,32 @@ List<String> _permissionPanel(
   );
 }
 
-String _toolResultLine(ToolResult result) {
+String _compactScrollText(String scrollText) {
+  final match = RegExp(r'^scroll: (\d+) line').firstMatch(scrollText);
+  if (match != null) {
+    return 'scroll: +${match.group(1)}';
+  }
+  return scrollText;
+}
+
+String _toolResultSummary(ToolResult result) {
   if (result.code == 'permission_denied') {
     return '${result.tool} denied';
   }
   final status = result.ok ? 'completed' : 'failed';
   final exit = result.exitCode == null ? '' : ' exit=${result.exitCode}';
+  return '${result.tool} $status$exit';
+}
+
+String? _toolResultDetail(ToolResult result) {
   final output = _oneLine(result.output);
   if (output.isEmpty) {
-    return '${result.tool} $status$exit';
+    return null;
   }
-  return '${result.tool} $status$exit: $output';
+  if (result.code == 'permission_denied') {
+    return 'reason: $output';
+  }
+  return 'output: $output';
 }
 
 List<String> _boxedLines({
@@ -1173,8 +1334,8 @@ List<String> _boxedLines({
   required List<String> lines,
   required int width,
 }) {
-  final boxWidth = width.clamp(40, 120).toInt();
-  final innerWidth = (boxWidth - 4).clamp(20, 116).toInt();
+  final boxWidth = width.clamp(24, 120).toInt();
+  final innerWidth = (boxWidth - 4).clamp(10, 116).toInt();
   final output = <String>[
     '+${'-' * (boxWidth - 2)}+',
     '| ${_padRightDisplay(title, innerWidth)} |',
@@ -1195,6 +1356,46 @@ String _padRightDisplay(String value, int width) {
     return value;
   }
   return '$value${' ' * (width - displayWidth)}';
+}
+
+String _styleUserMessageLine(String line, int width) {
+  return '$_userMessageStyle${_padRightDisplay(line, width)}$_ansiReset';
+}
+
+String _styleToolLine(String line) {
+  return '$_toolMessageStyle$line$_ansiReset';
+}
+
+String _styleNoticeLine(String line) {
+  return '$_noticeStyle$line$_ansiReset';
+}
+
+List<String> _renderChatLine(
+  _ChatLine message, {
+  required int contentWidth,
+  required bool expandToolDetails,
+}) {
+  switch (message.kind) {
+    case _ChatLineKind.user:
+      return [
+        for (final line in _wrapLine('you> ${message.content}', contentWidth))
+          _styleUserMessageLine(line, contentWidth),
+      ];
+    case _ChatLineKind.assistant:
+      return _wrapLine('assistant> ${message.content}', contentWidth);
+    case _ChatLineKind.tool:
+      final lines = <String>[
+        for (final line in _wrapLine('tool> ${message.content}', contentWidth))
+          _styleToolLine(line),
+      ];
+      final detail = message.detail;
+      if (expandToolDetails && detail != null && detail.isNotEmpty) {
+        lines.addAll(
+          _wrapLine('tool detail> $detail', contentWidth).map(_styleToolLine),
+        );
+      }
+      return lines;
+  }
 }
 
 List<Directory> _defaultWritableRoots() {
@@ -1371,18 +1572,6 @@ _InputRender _renderInput(
   return _InputRender(line: '$prompt$visible', cursorX: cursorX);
 }
 
-int _maxBodyLinesForHeight(
-  int height,
-  String? notice,
-  bool thinking,
-  String activeAssistantText,
-) {
-  final reservedLines = 9 +
-      (notice == null ? 0 : 1) +
-      (thinking && activeAssistantText.isEmpty ? 1 : 0);
-  return (height - reservedLines).clamp(3, 200).toInt();
-}
-
 String? _elapsedStatus(int? startedAt) {
   if (startedAt == null) {
     return null;
@@ -1504,18 +1693,23 @@ TextInputModel _inputWithValue(TextInputModel input, String value) {
   return input.copyWith(value: value, cursorPos: value.characters.length);
 }
 
-final class _ChatLine {
-  _ChatLine(this.label, this.content);
+enum _ChatLineKind { user, assistant, tool }
 
-  factory _ChatLine.user(String content) => _ChatLine('you', content);
+final class _ChatLine {
+  _ChatLine(this.kind, this.content, {this.detail});
+
+  factory _ChatLine.user(String content) =>
+      _ChatLine(_ChatLineKind.user, content);
 
   factory _ChatLine.assistant(String content) =>
-      _ChatLine('assistant', content);
+      _ChatLine(_ChatLineKind.assistant, content);
 
-  factory _ChatLine.tool(String content) => _ChatLine('tool', content);
+  factory _ChatLine.tool(String content, {String? detail}) =>
+      _ChatLine(_ChatLineKind.tool, content, detail: detail);
 
-  final String label;
+  final _ChatLineKind kind;
   final String content;
+  final String? detail;
 }
 
 final class _AgentDeltaMsg extends Msg {
