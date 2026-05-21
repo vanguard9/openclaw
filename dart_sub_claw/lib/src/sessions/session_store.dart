@@ -12,6 +12,9 @@ class SessionStore {
   Directory get sessionsDir =>
       Directory('${home.path}${Platform.pathSeparator}sessions');
 
+  Directory get archivedSessionsDir =>
+      Directory('${sessionsDir.path}${Platform.pathSeparator}archive');
+
   File sessionFile(String sessionId) {
     final safeId = sessionId.replaceAll(RegExp(r'[^a-zA-Z0-9._-]'), '_');
     return File('${sessionsDir.path}${Platform.pathSeparator}$safeId.jsonl');
@@ -51,5 +54,28 @@ class SessionStore {
       '${jsonEncode(message.toJson())}\n',
       mode: FileMode.append,
     );
+  }
+
+  Future<File?> reset(String sessionId) async {
+    final current = sessionFile(sessionId);
+    if (!await current.exists()) return null;
+
+    await archivedSessionsDir.create(recursive: true);
+    final baseName = current.uri.pathSegments.last.replaceFirst(
+      RegExp(r'\.jsonl$'),
+      '',
+    );
+    final stamp = DateTime.now().toUtc().millisecondsSinceEpoch;
+    var suffix = 0;
+    while (true) {
+      final extra = suffix == 0 ? '' : '-$suffix';
+      final archive = File(
+        '${archivedSessionsDir.path}${Platform.pathSeparator}$baseName-$stamp$extra.jsonl',
+      );
+      if (!await archive.exists()) {
+        return current.rename(archive.path);
+      }
+      suffix += 1;
+    }
   }
 }

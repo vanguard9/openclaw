@@ -260,6 +260,44 @@ if {$code != 0} { exit $code }
   );
 
   await _runExpect(
+    name: 'slash-new-session-reset',
+    setup: (home) => _writeSessionHistory(home, 'tui-new-smoke'),
+    script: r'''
+set timeout 8
+spawn dart run bin/dart_sub_claw.dart tui --session tui-new-smoke --history 4
+after 1000
+expect "old session reply"
+send "/new\r"
+expect "notice: session tui-new-smoke reset; previous history archived"
+expect "history: empty"
+send "/exit\r"
+expect eof
+catch wait result
+set code [lindex $result 3]
+if {$code != 0} { exit $code }
+''',
+  );
+
+  await _runExpect(
+    name: 'slash-reset-session-reset',
+    setup: (home) => _writeSessionHistory(home, 'tui-reset-smoke'),
+    script: r'''
+set timeout 8
+spawn dart run bin/dart_sub_claw.dart tui --session tui-reset-smoke --history 4
+after 1000
+expect "old session reply"
+send "/reset\r"
+expect "notice: session tui-reset-smoke reset; previous history archived"
+expect "history: empty"
+send "/exit\r"
+expect eof
+catch wait result
+set code [lindex $result 3]
+if {$code != 0} { exit $code }
+''',
+  );
+
+  await _runExpect(
     name: 'mouse-wheel-is-ignored',
     script: r'''
 set timeout 8
@@ -377,6 +415,60 @@ if {$code != 0} { exit $code }
     );
   } finally {
     await slowServer.close(force: true);
+  }
+
+  final traceServer = await _startTraceSseServer();
+  try {
+    await _runExpect(
+      name: 'debug-live-panel',
+      setup: (home) => _writeProviderConfig(home, traceServer.port),
+      script: r'''
+set timeout 12
+spawn dart run bin/dart_sub_claw.dart tui --debug --session tui-debug-smoke --history 0
+after 1000
+expect "debug=on"
+expect "Debug: agent and LLM"
+send "hello debug\r"
+expect "debug> llm.request step=0 stream=true messages=2"
+expect "debug> llm.delta step=0 \"trace final\""
+expect "debug> llm.response step=0 \"trace final\""
+expect "assistant> trace final"
+send "\017"
+expect "notice: debug details expanded"
+expect "data>"
+expect "\"messages\""
+send "/debug\r"
+expect "notice: debug view off"
+send "/exit\r"
+expect eof
+catch wait result
+set code [lindex $result 3]
+if {$code != 0} { exit $code }
+''',
+    );
+
+    await _runExpect(
+      name: 'trace-live-output',
+      setup: (home) => _writeProviderConfig(home, traceServer.port),
+      script: r'''
+set timeout 12
+spawn dart run bin/dart_sub_claw.dart tui --trace --session tui-trace-smoke --history 0
+after 1000
+expect "trace=on"
+send "hello trace\r"
+expect "trace> llm.request step=0 stream=true messages=2"
+expect "trace> llm.delta step=0 \"trace final\""
+expect "trace> llm.response step=0 \"trace final\""
+expect "assistant> trace final"
+send "/exit\r"
+expect eof
+catch wait result
+set code [lindex $result 3]
+if {$code != 0} { exit $code }
+''',
+    );
+  } finally {
+    await traceServer.close(force: true);
   }
 
   final toolServer = await _startToolSseServer();
@@ -597,6 +689,37 @@ Future<HttpServer> _startSlowSseServer() async {
   return server;
 }
 
+Future<HttpServer> _startTraceSseServer() async {
+  final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+  server.listen((request) async {
+    final response = request.response;
+    try {
+      if (request.uri.path != '/chat/completions') {
+        response.statusCode = HttpStatus.notFound;
+        await response.close();
+        return;
+      }
+      await utf8.decoder.bind(request).join();
+      response.headers.contentType =
+          ContentType('text', 'event-stream', charset: 'utf-8');
+      response.write(
+        'data: ${jsonEncode({
+              'choices': [
+                {
+                  'delta': {'content': 'trace final'},
+                },
+              ],
+            })}\n\n',
+      );
+      response.write('data: [DONE]\n\n');
+      await response.close();
+    } catch (_) {
+      await response.close().catchError((_) {});
+    }
+  });
+  return server;
+}
+
 Future<HttpServer> _startToolSseServer() async {
   final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
   server.listen((request) async {
@@ -658,16 +781,30 @@ Future<void> _writeEnvSuggestionConfig(Directory home) async {
 }
 
 Future<void> _writeSessionSuggestion(Directory home) async {
+  await _writeSessionHistory(home, 'tui-session-panel-target',
+      assistantReply: 'session panel target');
+}
+
+Future<void> _writeSessionHistory(
+  Directory home,
+  String sessionId, {
+  String assistantReply = 'old session reply',
+}) async {
   final sessionsDir =
       Directory('${home.path}${Platform.pathSeparator}sessions');
   await sessionsDir.create(recursive: true);
   final file = File(
-    '${sessionsDir.path}${Platform.pathSeparator}tui-session-panel-target.jsonl',
+    '${sessionsDir.path}${Platform.pathSeparator}$sessionId.jsonl',
   );
   await file.writeAsString(
     '${jsonEncode({
+          'role': 'user',
+          'content': 'old session question',
+          'createdAt': DateTime.utc(2026, 1, 1).toIso8601String(),
+        })}\n'
+    '${jsonEncode({
           'role': 'assistant',
-          'content': 'session panel target',
+          'content': assistantReply,
           'createdAt': DateTime.utc(2026, 1, 1).toIso8601String(),
         })}\n',
   );

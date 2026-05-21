@@ -68,13 +68,46 @@ Start the terminal chat UI:
 ```sh
 dartsub tui
 dartsub tui --env test --session test
+dartsub tui --debug
+dartsub tui --trace
+dartsub tui --trace-gateway
 dartsub tui --mouse
 dartsub tui --alt-screen
 ```
 
 The TUI is built with `dart_tui`. It uses the package Model-Update-View runtime and spinner, while `dartsub` owns input editing compatibility for `Backspace`, `Ctrl-H`, pasted text, and wide-character wrapping. It shows a `思考中` spinner until the first streamed chunk arrives, streams assistant output as chunks arrive from the provider, and then persists the full reply to the session. Esc or `/cancel` cancels an active provider stream without saving a partial assistant reply.
 
+Use `dartsub tui --debug` when you need to inspect the agent and LLM exchange while you chat. The debug view is local to the TUI and keeps the chat log separate from provider events. It shows the request step, streamed deltas, final LLM response, and tool calls/results. Run `/debug` at any time to toggle the view; press `Ctrl-O` to expand the structured payloads and inspect the exact messages sent to the provider.
+
 Mouse capture and alternate screen are off by default so terminal text can be selected and copied normally from the scrollback. Start with `--mouse` if you prefer mouse-wheel scrolling inside the TUI, or `--alt-screen` if you prefer the previous fullscreen-style terminal surface.
+
+Advanced trace mode remains available for raw event routing. Start TUI with `--trace` to show compact local trace rows in the chat log. Trace rows include `llm.request`, streamed `llm.delta`, `llm.response`, `tool.call`, and `tool.result` events. Press `Ctrl-O` to expand trace rows and inspect the full JSON payload. Use `--trace-gateway` when you want the TUI to publish trace events to the local Gateway without rendering trace rows inside the TUI.
+
+For a larger live view, use the Gateway trace stream from another terminal. The `GET /trace` endpoint broadcasts trace events for Gateway `/agent` and `/agent/stream` runs as server-sent events:
+
+```sh
+dartsub gateway run
+curl -N http://127.0.0.1:18987/trace
+curl -N http://127.0.0.1:18987/trace | sed -n 's/^data: //p' | jq .
+```
+
+Then send an agent request through the Gateway from another terminal:
+
+```sh
+curl -N http://127.0.0.1:18987/agent/stream \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"hello trace","sessionId":"trace-demo"}'
+```
+
+For direct TUI sessions, start the TUI with Gateway trace publishing enabled:
+
+```sh
+dartsub tui --trace-gateway
+```
+
+`dartsub tui --trace` also publishes to the Gateway trace stream while keeping the compact trace rows visible in the TUI.
+
+Debug and trace modes are opt-in because prompts, message history, and tool outputs may contain private data.
 
 The agent runtime includes an MVP tool loop. Models can request tools using the internal `<tool_call>{...}</tool_call>` protocol, and `dartsub` executes these controlled tools in the current working directory:
 
@@ -117,6 +150,9 @@ TUI commands:
 /help
 /status
 /history
+/debug
+/new
+/reset
 /session <id>
 /env <name|default>
 /lang <auto|zh-CN|en-US>
@@ -124,6 +160,11 @@ TUI commands:
 /cancel
 /exit
 ```
+
+`/new` and `/reset` start a fresh context for the current TUI session. The
+previous JSONL transcript is archived under `~/.dart_sub_claw/sessions/archive/`
+instead of being sent to the provider on the next turn. `/clear` only clears
+the visible terminal chat log and keeps the session history.
 
 Run diagnostics:
 
@@ -184,7 +225,11 @@ curl -N http://127.0.0.1:18987/agent/stream \
 Errors use a stable shape:
 
 ```json
-{"requestId":"req_...","code":"validation_error","message":"message is required"}
+{
+  "requestId": "req_...",
+  "code": "validation_error",
+  "message": "message is required"
+}
 ```
 
 ## Runtime Data

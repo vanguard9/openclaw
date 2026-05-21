@@ -166,6 +166,18 @@ Future<void> main() async {
     throw StateError('session persistence failed');
   }
 
+  final sessionStore = SessionStore(home: temp);
+  final archived = await sessionStore.reset('test');
+  final resetMessages = await sessionStore.read('test');
+  final archivedMessages = archived == null ? [] : await archived.readAsLines();
+  if (resetMessages.isNotEmpty ||
+      archived == null ||
+      archivedMessages.length != 2 ||
+      !archived.path.contains(
+          '${Platform.pathSeparator}archive${Platform.pathSeparator}')) {
+    throw StateError('session reset did not archive the prior transcript');
+  }
+
   final deltas = <String>[];
   final streamResult = await service.runTurnStreaming(
     message: 'stream',
@@ -174,6 +186,32 @@ Future<void> main() async {
   );
   if (streamResult.reply != 'echo: stream' || deltas.join() != 'echo: stream') {
     throw StateError('streaming agent turn failed');
+  }
+
+  final traceEvents = <AgentTraceEvent>[];
+  final traceDeltas = <String>[];
+  final traceResult = await service.runTurnStreaming(
+    message: 'trace me',
+    sessionId: 'trace-test',
+    onDelta: traceDeltas.add,
+    onTrace: traceEvents.add,
+  );
+  if (traceResult.reply != 'echo: trace me' ||
+      traceDeltas.join() != 'echo: trace me') {
+    throw StateError('traced streaming turn failed');
+  }
+  final traceTypes = traceEvents.map((event) => event.type).toList();
+  if (traceTypes.first != 'llm.request' ||
+      !traceTypes.contains('llm.delta') ||
+      traceTypes.last != 'llm.response') {
+    throw StateError('unexpected trace events: $traceTypes');
+  }
+  final tracedMessages = traceEvents.first.data['messages'];
+  if (tracedMessages is! List ||
+      tracedMessages.length != 2 ||
+      tracedMessages.first is! Map ||
+      (tracedMessages.first as Map)['role'] != 'system') {
+    throw StateError('llm.request trace did not include provider messages');
   }
 
   final metadataService = AgentService(
@@ -388,6 +426,33 @@ Future<void> main() async {
       streamed.join() != 'final after tool' ||
       streamed.join().contains('<tool_call>')) {
     throw StateError('streaming tool call leaked or failed: $streamed');
+  }
+  final tracedToolProvider = ScriptedProvider([
+    '<tool_call>{"tool":"shell","arguments":{"command":"printf traced-tool"}}</tool_call>',
+    'final after traced tool',
+  ]);
+  final tracedToolService = AgentService(
+    configStore: ConfigStore(home: toolTemp),
+    sessionStore: SessionStore(home: toolTemp),
+    provider: tracedToolProvider,
+    toolRuntime: ToolRuntime(
+      root: toolTemp,
+      permissionHandler: (_) => ToolPermissionDecision.allow,
+    ),
+  );
+  final tracedToolEvents = <AgentTraceEvent>[];
+  final tracedToolResult = await tracedToolService.runTurnStreaming(
+    message: 'trace shell',
+    sessionId: 'traced-tool-test',
+    onDelta: (_) {},
+    onTrace: tracedToolEvents.add,
+  );
+  final tracedToolTypes = tracedToolEvents.map((event) => event.type).toList();
+  if (tracedToolResult.reply != 'final after traced tool' ||
+      !tracedToolTypes.contains('tool.call') ||
+      !tracedToolTypes.contains('tool.result') ||
+      tracedToolTypes.where((type) => type == 'llm.request').length != 2) {
+    throw StateError('tool trace events missing: $tracedToolTypes');
   }
   final deniedShellProvider = ScriptedProvider([
     '<tool_call>{"tool":"shell","arguments":{"command":"printf denied"}} </tool_call>',

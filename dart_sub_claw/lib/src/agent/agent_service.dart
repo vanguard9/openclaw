@@ -22,8 +22,24 @@ class AgentTurnResult {
   final ChatCompletionMetadata metadata;
 }
 
+class AgentTraceEvent {
+  const AgentTraceEvent({
+    required this.type,
+    this.data = const {},
+  });
+
+  final String type;
+  final Map<String, Object?> data;
+
+  Map<String, Object?> toJson() => {
+        'type': type,
+        if (data.isNotEmpty) 'data': data,
+      };
+}
+
 typedef AgentToolCallHandler = FutureOr<void> Function(ToolCall call);
 typedef AgentToolResultHandler = FutureOr<void> Function(ToolResult result);
+typedef AgentTraceHandler = FutureOr<void> Function(AgentTraceEvent event);
 
 class AgentService {
   AgentService({
@@ -46,6 +62,7 @@ class AgentService {
     String sessionId = 'default',
     String? environment,
     ToolPermissionPolicy? toolPolicyOverride,
+    AgentTraceHandler? onTrace,
     CancellationToken? cancellationToken,
   }) async {
     final trimmed = message.trim();
@@ -73,6 +90,7 @@ class AgentService {
       sessionId: sessionId,
       toolPolicy:
           toolPolicyOverride ?? envConfig.toolPolicy.toPermissionPolicy(),
+      onTrace: onTrace,
       cancellationToken: cancellationToken,
     );
     cancellationToken?.throwIfCancelled();
@@ -91,6 +109,7 @@ class AgentService {
     required FutureOr<void> Function(String delta) onDelta,
     AgentToolCallHandler? onToolCall,
     AgentToolResultHandler? onToolResult,
+    AgentTraceHandler? onTrace,
     String sessionId = 'default',
     String? environment,
     ToolPermissionPolicy? toolPolicyOverride,
@@ -125,6 +144,7 @@ class AgentService {
       onDelta: onDelta,
       onToolCall: onToolCall,
       onToolResult: onToolResult,
+      onTrace: onTrace,
     );
     cancellationToken?.throwIfCancelled();
     await sessionStore.append(
@@ -153,16 +173,19 @@ class AgentService {
     required List<ChatMessage> messages,
     required String sessionId,
     required ToolPermissionPolicy toolPolicy,
+    AgentTraceHandler? onTrace,
     required CancellationToken? cancellationToken,
   }) async {
     final working = List<ChatMessage>.from(messages);
     for (var step = 0; step <= defaultMaxToolSteps; step += 1) {
       cancellationToken?.throwIfCancelled();
+      await _emitTrace(onTrace, _llmRequestTrace(step, working, false));
       final completion = await _completeOneMessage(
         provider: provider,
         messages: working,
         cancellationToken: cancellationToken,
       );
+      await _emitTrace(onTrace, _llmResponseTrace(step, completion));
       final call = toolRuntime.parseToolCall(completion.content);
       if (call == null) {
         return completion;
@@ -173,11 +196,13 @@ class AgentService {
         );
       }
       working.add(ChatMessage(role: 'assistant', content: completion.content));
+      await _emitTrace(onTrace, _toolCallTrace(step, call));
       final result = await toolRuntime.run(
         call,
         policy: toolPolicy,
         sessionId: sessionId,
       );
+      await _emitTrace(onTrace, _toolResultTrace(step, result));
       working.add(_toolResultMessage(result));
     }
     return const ChatCompletionResult(
@@ -194,16 +219,21 @@ class AgentService {
     required FutureOr<void> Function(String delta) onDelta,
     AgentToolCallHandler? onToolCall,
     AgentToolResultHandler? onToolResult,
+    AgentTraceHandler? onTrace,
   }) async {
     final working = List<ChatMessage>.from(messages);
     for (var step = 0; step <= defaultMaxToolSteps; step += 1) {
       cancellationToken?.throwIfCancelled();
+      await _emitTrace(onTrace, _llmRequestTrace(step, working, true));
       final completion = await _streamOneAssistantMessage(
         provider: provider,
         messages: working,
         cancellationToken: cancellationToken,
         onDelta: onDelta,
+        onTrace: onTrace,
+        traceStep: step,
       );
+      await _emitTrace(onTrace, _llmResponseTrace(step, completion));
       final call = toolRuntime.parseToolCall(completion.content);
       if (call == null) {
         return completion;
@@ -214,12 +244,14 @@ class AgentService {
         return const ChatCompletionResult(content: limit);
       }
       working.add(ChatMessage(role: 'assistant', content: completion.content));
+      await _emitTrace(onTrace, _toolCallTrace(step, call));
       await onToolCall?.call(call);
       final result = await toolRuntime.run(
         call,
         policy: toolPolicy,
         sessionId: sessionId,
       );
+      await _emitTrace(onTrace, _toolResultTrace(step, result));
       await onToolResult?.call(result);
       working.add(_toolResultMessage(result));
     }
@@ -253,6 +285,8 @@ class AgentService {
     required List<ChatMessage> messages,
     required CancellationToken? cancellationToken,
     required FutureOr<void> Function(String delta) onDelta,
+    AgentTraceHandler? onTrace,
+    required int traceStep,
   }) async {
     final buffer = StringBuffer();
     var metadata = ChatCompletionMetadata.empty;
@@ -278,6 +312,16 @@ class AgentService {
       if (delta.isEmpty) {
         continue;
       }
+      await _emitTrace(
+        onTrace,
+        AgentTraceEvent(
+          type: 'llm.delta',
+          data: {
+            'step': traceStep,
+            'delta': delta,
+          },
+        ),
+      );
       buffer.write(delta);
       if (!flushed && !_couldBeToolCallPrefix(buffer.toString())) {
         flushed = true;
@@ -308,5 +352,75 @@ class AgentService {
       content:
           'Tool result:\n${encoder.convert(result.toJson())}\nContinue with the final answer or request another tool.',
     );
+  }
+
+  AgentTraceEvent _llmRequestTrace(
+    int step,
+    List<ChatMessage> messages,
+    bool stream,
+  ) {
+    return AgentTraceEvent(
+      type: 'llm.request',
+      data: {
+        'step': step,
+        'stream': stream,
+        'messages': _messagesToProviderJson(messages),
+      },
+    );
+  }
+
+  AgentTraceEvent _llmResponseTrace(
+    int step,
+    ChatCompletionResult completion,
+  ) {
+    return AgentTraceEvent(
+      type: 'llm.response',
+      data: {
+        'step': step,
+        'content': completion.content,
+        if (!completion.metadata.isEmpty)
+          'metadata': completion.metadata.toJson(),
+      },
+    );
+  }
+
+  AgentTraceEvent _toolCallTrace(int step, ToolCall call) {
+    return AgentTraceEvent(
+      type: 'tool.call',
+      data: {
+        'step': step,
+        'tool': call.tool,
+        'arguments': call.arguments,
+      },
+    );
+  }
+
+  AgentTraceEvent _toolResultTrace(int step, ToolResult result) {
+    return AgentTraceEvent(
+      type: 'tool.result',
+      data: {
+        'step': step,
+        'result': result.toJson(),
+      },
+    );
+  }
+
+  List<Map<String, Object?>> _messagesToProviderJson(
+    List<ChatMessage> messages,
+  ) {
+    return [
+      for (final message in messages)
+        {
+          'role': message.role,
+          'content': message.content,
+        },
+    ];
+  }
+
+  Future<void> _emitTrace(
+    AgentTraceHandler? onTrace,
+    AgentTraceEvent event,
+  ) async {
+    await onTrace?.call(event);
   }
 }

@@ -70,6 +70,9 @@ Future<int> _runTui(List<String> args, IOSink out) async {
       Platform.environment['DARTSUB_TUI_LOCALE'];
   final captureMouse = args.contains('--mouse');
   final altScreen = args.contains('--alt-screen');
+  final debug = args.contains('--debug');
+  final trace = args.contains('--trace');
+  final traceGateway = args.contains('--trace-gateway');
   final historyLimit = historyRaw == null ? 12 : int.tryParse(historyRaw);
   if (historyLimit == null || historyLimit < 0) {
     out.writeln('--history must be a non-negative number');
@@ -84,6 +87,9 @@ Future<int> _runTui(List<String> args, IOSink out) async {
     localeOverride: localeOverride,
     captureMouse: captureMouse,
     altScreen: altScreen,
+    debug: debug,
+    trace: trace,
+    traceGateway: traceGateway,
   );
 }
 
@@ -157,6 +163,10 @@ Future<int> _runGateway(List<String> args, IOSink out) async {
   final uri =
       await server.start(host: host, port: port, environment: environment);
   out.writeln('dartsub gateway listening on $uri');
+  out.writeln(
+      'trace stream: curl -N ${uri.resolve('/trace')} | sed -n \'s/^data: //p\' | jq .');
+  out.writeln(
+      'trace captures Gateway /agent, /agent/stream, and dartsub tui --trace-gateway');
   await ProcessSignal.sigint.watch().first;
   await server.close();
   return 0;
@@ -199,7 +209,7 @@ Commands:
   agent [--env <name>] --message <text> [--session <id>] Run one agent turn
   gateway run [--env <name>] [--host <host>] [--port <port>]
                                                        Start local HTTP/WebSocket gateway
-  tui [--env <name>] [--session <id>] [--history <n>] [--locale <auto|zh-CN|en-US>] [--mouse] [--alt-screen]
+  tui [--env <name>] [--session <id>] [--history <n>] [--locale <auto|zh-CN|en-US>] [--mouse] [--alt-screen] [--debug] [--trace] [--trace-gateway]
                                                        Start terminal chat
   doctor [--env <name>] [--skip-model]                 Check config and runtime health
   config [--env <name>] list                          Show config

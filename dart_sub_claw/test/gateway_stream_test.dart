@@ -6,6 +6,7 @@ import 'package:dart_sub_claw/src/agent/cancellation.dart';
 import 'package:dart_sub_claw/src/agent/agent_service.dart';
 import 'package:dart_sub_claw/src/config/config_store.dart';
 import 'package:dart_sub_claw/src/gateway/gateway_server.dart';
+import 'package:dart_sub_claw/src/gateway/trace_publisher.dart';
 import 'package:dart_sub_claw/src/providers/chat_provider.dart';
 import 'package:dart_sub_claw/src/providers/openai_compatible_provider.dart';
 import 'package:dart_sub_claw/src/sessions/chat_message.dart';
@@ -143,6 +144,8 @@ Future<void> main() async {
   await _testProviderErrorsAreStructured();
   await _testProviderTimeoutsAreStructured();
   await _testSseStreamCompletes();
+  await _testTraceStreamReceivesAgentTraceEvents();
+  await _testTraceStreamReceivesPostedTraceEvents();
   await _testClientDisconnectCancelsProvider();
 }
 
@@ -464,6 +467,180 @@ Future<void> _testSseStreamCompletes() async {
   }
 }
 
+Future<void> _testTraceStreamReceivesAgentTraceEvents() async {
+  final temp = await Directory.systemTemp.createTemp('dart_sub_gateway_trace_');
+  final configStore = ConfigStore(home: temp);
+  final sessionStore = SessionStore(home: temp);
+  final server = GatewayServer(
+    configStore: configStore,
+    sessionStore: sessionStore,
+    agentService: AgentService(
+      configStore: configStore,
+      sessionStore: sessionStore,
+      provider: StreamingProvider(['trace', ' ', 'reply']),
+    ),
+  );
+  final uri = await server.start(host: '127.0.0.1', port: 0);
+  final client = HttpClient();
+  StreamSubscription<String>? traceSubscription;
+  try {
+    final traceRequest = await client.getUrl(uri.resolve('/trace'));
+    final traceResponse = await traceRequest.close();
+    if (traceResponse.statusCode != 200) {
+      throw StateError(
+          'expected /trace HTTP 200, got ${traceResponse.statusCode}');
+    }
+
+    final traceEvents = <_SseEvent>[];
+    final helloSeen = Completer<void>();
+    final requestSeen = Completer<_SseEvent>();
+    final deltaSeen = Completer<_SseEvent>();
+    final responseSeen = Completer<_SseEvent>();
+    traceSubscription = _listenForSseEvents(traceResponse, (event) {
+      traceEvents.add(event);
+      if (event.name == 'hello' && !helloSeen.isCompleted) {
+        final captures = event.data['captures'];
+        if (event.data['message'] is! String ||
+            captures is! List ||
+            !captures.contains('/agent/stream')) {
+          throw StateError('unexpected /trace hello event: $event');
+        }
+        helloSeen.complete();
+      }
+      if (event.name != 'trace') {
+        return;
+      }
+      switch (event.data['type']) {
+        case 'llm.request':
+          if (!requestSeen.isCompleted) {
+            requestSeen.complete(event);
+          }
+        case 'llm.delta':
+          if (!deltaSeen.isCompleted) {
+            deltaSeen.complete(event);
+          }
+        case 'llm.response':
+          if (!responseSeen.isCompleted) {
+            responseSeen.complete(event);
+          }
+      }
+    });
+
+    await helloSeen.future.timeout(const Duration(seconds: 5));
+
+    final request = await client.postUrl(uri.resolve('/agent/stream'));
+    request.headers.contentType = ContentType.json;
+    request.write(jsonEncode({
+      'message': 'trace please',
+      'sessionId': 'gateway-trace',
+    }));
+    final response = await request.close();
+    final body = await response.transform(utf8.decoder).join().timeout(
+          const Duration(seconds: 5),
+          onTimeout: () => throw StateError('stream did not complete'),
+        );
+    final streamEvents = _parseSseEvents(body);
+    if (response.statusCode != 200 || streamEvents.last.name != 'completed') {
+      throw StateError('unexpected /agent/stream trace response: $body');
+    }
+    final requestId = streamEvents.first.data['requestId'];
+    if (requestId is! String || requestId.isEmpty) {
+      throw StateError('missing stream requestId: $streamEvents');
+    }
+
+    final requestEvent =
+        await requestSeen.future.timeout(const Duration(seconds: 5));
+    final deltaEvent =
+        await deltaSeen.future.timeout(const Duration(seconds: 5));
+    final responseEvent =
+        await responseSeen.future.timeout(const Duration(seconds: 5));
+    for (final event in [requestEvent, deltaEvent, responseEvent]) {
+      if (event.data['requestId'] != requestId ||
+          event.data['sessionId'] != 'gateway-trace') {
+        throw StateError('trace identifiers mismatch: $traceEvents');
+      }
+    }
+    final requestData = requestEvent.data['data'];
+    if (requestData is! Map || requestData['stream'] != true) {
+      throw StateError('unexpected llm.request trace data: $requestEvent');
+    }
+    final deltaData = deltaEvent.data['data'];
+    if (deltaData is! Map || deltaData['delta'] != 'trace') {
+      throw StateError('unexpected llm.delta trace data: $deltaEvent');
+    }
+    final responseData = responseEvent.data['data'];
+    if (responseData is! Map || responseData['content'] != 'trace reply') {
+      throw StateError('unexpected llm.response trace data: $responseEvent');
+    }
+  } finally {
+    await traceSubscription?.cancel();
+    client.close(force: true);
+    await server.close();
+    await temp.delete(recursive: true);
+  }
+}
+
+Future<void> _testTraceStreamReceivesPostedTraceEvents() async {
+  final temp =
+      await Directory.systemTemp.createTemp('dart_sub_gateway_trace_post_');
+  final configStore = ConfigStore(home: temp);
+  final sessionStore = SessionStore(home: temp);
+  final server = GatewayServer(
+    configStore: configStore,
+    sessionStore: sessionStore,
+    agentService: AgentService(
+      configStore: configStore,
+      sessionStore: sessionStore,
+      provider: StreamingProvider(['unused']),
+    ),
+  );
+  final uri = await server.start(host: '127.0.0.1', port: 0);
+  final client = HttpClient();
+  final publisher = GatewayTracePublisher(host: '127.0.0.1', port: uri.port);
+  StreamSubscription<String>? traceSubscription;
+  try {
+    final traceRequest = await client.getUrl(uri.resolve('/trace'));
+    final traceResponse = await traceRequest.close();
+    final postedSeen = Completer<_SseEvent>();
+    traceSubscription = _listenForSseEvents(traceResponse, (event) {
+      if (event.name == 'trace' &&
+          event.data['source'] == 'tui' &&
+          !postedSeen.isCompleted) {
+        postedSeen.complete(event);
+      }
+    });
+
+    await publisher.publish(
+      requestId: 'tui_test_request',
+      sessionId: 'tui-posted-trace',
+      environment: 'test',
+      source: 'tui',
+      event: const AgentTraceEvent(
+        type: 'llm.request',
+        data: {'step': 0, 'stream': true},
+      ),
+    );
+
+    final event = await postedSeen.future.timeout(const Duration(seconds: 5));
+    if (event.data['requestId'] != 'tui_test_request' ||
+        event.data['sessionId'] != 'tui-posted-trace' ||
+        event.data['environment'] != 'test' ||
+        event.data['type'] != 'llm.request') {
+      throw StateError('unexpected posted trace event: $event');
+    }
+    final data = event.data['data'];
+    if (data is! Map || data['stream'] != true) {
+      throw StateError('unexpected posted trace data: $event');
+    }
+  } finally {
+    publisher.close();
+    await traceSubscription?.cancel();
+    client.close(force: true);
+    await server.close();
+    await temp.delete(recursive: true);
+  }
+}
+
 Future<void> _testClientDisconnectCancelsProvider() async {
   final temp =
       await Directory.systemTemp.createTemp('dart_sub_gateway_cancel_');
@@ -544,6 +721,49 @@ List<_SseEvent> _parseSseEvents(String body) {
     }
   }
   return events;
+}
+
+StreamSubscription<String> _listenForSseEvents(
+  Stream<List<int>> stream,
+  void Function(_SseEvent event) onEvent,
+) {
+  final buffer = StringBuffer();
+  return stream.transform(utf8.decoder).listen((chunk) {
+    buffer.write(chunk);
+    var text = buffer.toString();
+    var separator = text.indexOf('\n\n');
+    while (separator != -1) {
+      final eventBlock = text.substring(0, separator);
+      text = text.substring(separator + 2);
+      final event = _sseEventFromBlock(eventBlock);
+      if (event != null) {
+        onEvent(event);
+      }
+      separator = text.indexOf('\n\n');
+    }
+    buffer
+      ..clear()
+      ..write(text);
+  });
+}
+
+_SseEvent? _sseEventFromBlock(String block) {
+  String? name;
+  final data = StringBuffer();
+  for (final line in const LineSplitter().convert(block)) {
+    if (line.startsWith('event: ')) {
+      name = line.substring('event: '.length);
+    } else if (line.startsWith('data: ')) {
+      data.write(line.substring('data: '.length));
+    }
+  }
+  if (name == null) {
+    return null;
+  }
+  return _SseEvent(
+    name,
+    (jsonDecode(data.toString()) as Map).cast<String, Object?>(),
+  );
 }
 
 class _SseEvent {

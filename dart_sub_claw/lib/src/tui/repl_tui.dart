@@ -9,6 +9,7 @@ import '../agent/cancellation.dart';
 import '../agent/agent_service.dart';
 import '../config/app_config.dart';
 import '../config/config_store.dart';
+import '../gateway/trace_publisher.dart';
 import '../sessions/chat_message.dart';
 import '../sessions/session_store.dart';
 import '../tools/tool_policy.dart';
@@ -17,10 +18,13 @@ import 'tui_strings.dart';
 
 const Object _copyUnset = Object();
 const int _maxInputHistory = 100;
+const int _maxDebugEvents = 80;
+const int _debugPanelEventLimit = 12;
 const String _inputPlaceholder = '';
 const String _ansiReset = '\x1b[0m';
 const String _userMessageStyle = '\x1b[48;2;49;50;68m\x1b[38;2;236;239;244m';
 const String _toolMessageStyle = '\x1b[38;2;148;163;184m';
+const String _traceMessageStyle = '\x1b[38;2;56;189;248m';
 const String _noticeStyle = '\x1b[38;2;251;191;36m';
 
 enum _ActivityState {
@@ -68,11 +72,21 @@ class ReplTui {
     TuiLocalePreference? localeOverride,
     bool captureMouse = false,
     bool altScreen = false,
+    bool debug = false,
+    bool trace = false,
+    bool traceGateway = false,
   }) async {
     final config = await configStore.ensureExists();
     final envName = normalizeEnvironmentName(environment);
+    final envConfig = config.resolveEnvironment(envName);
     final history = await sessionStore.read(sessionId);
     final knownSessionIds = await sessionStore.listSessionIds();
+    final tracePublisher = (trace || traceGateway)
+        ? GatewayTracePublisher(
+            host: envConfig.gateway.host,
+            port: envConfig.gateway.port,
+          )
+        : null;
     late final Program program;
     late final AgentService service;
     program = Program(
@@ -98,25 +112,33 @@ class ReplTui {
             },
           ),
         );
-    await program.run(
-      _ChatTuiModel(
-        config: config,
-        configStore: configStore,
-        sessionStore: sessionStore,
-        agentService: service,
-        sessionId: sessionId,
-        environment: envName,
-        historyLimit: historyLimit,
-        localePreference: localeOverride ?? config.tui.locale,
-        knownSessionIds: {
-          sessionId,
-          ...knownSessionIds,
-        }.toList(),
-        messages: _linesFromHistory(history, historyLimit),
-        inputHistory: _inputHistoryFromMessages(history),
-        send: program.send,
-      ),
-    );
+    try {
+      await program.run(
+        _ChatTuiModel(
+          config: config,
+          configStore: configStore,
+          sessionStore: sessionStore,
+          agentService: service,
+          sessionId: sessionId,
+          environment: envName,
+          historyLimit: historyLimit,
+          localePreference: localeOverride ?? config.tui.locale,
+          debugEnabled: debug,
+          traceEnabled: trace,
+          traceGatewayEnabled: traceGateway,
+          tracePublisher: tracePublisher,
+          knownSessionIds: {
+            sessionId,
+            ...knownSessionIds,
+          }.toList(),
+          messages: _linesFromHistory(history, historyLimit),
+          inputHistory: _inputHistoryFromMessages(history),
+          send: program.send,
+        ),
+      );
+    } finally {
+      tracePublisher?.close();
+    }
     return 0;
   }
 }
@@ -131,6 +153,9 @@ final class _ChatTuiModel extends TeaModel {
     required this.environment,
     required this.historyLimit,
     required this.localePreference,
+    required this.traceEnabled,
+    required this.traceGatewayEnabled,
+    required this.tracePublisher,
     required this.knownSessionIds,
     required this.messages,
     required this.inputHistory,
@@ -158,6 +183,8 @@ final class _ChatTuiModel extends TeaModel {
     this.slashSelectionIndex = 0,
     this.slashSuggestionsDismissed = false,
     this.helpPanelVisible = false,
+    this.debugEnabled = false,
+    this.debugEvents = const [],
   })  : input = input ??
             TextInputModel(
               placeholder: _inputPlaceholder,
@@ -177,6 +204,9 @@ final class _ChatTuiModel extends TeaModel {
   final String? environment;
   final int historyLimit;
   final TuiLocalePreference localePreference;
+  final bool traceEnabled;
+  final bool traceGatewayEnabled;
+  final GatewayTracePublisher? tracePublisher;
   final List<String> knownSessionIds;
   final List<_ChatLine> messages;
   final List<String> inputHistory;
@@ -204,6 +234,8 @@ final class _ChatTuiModel extends TeaModel {
   final int slashSelectionIndex;
   final bool slashSuggestionsDismissed;
   final bool helpPanelVisible;
+  final bool debugEnabled;
+  final List<AgentTraceEvent> debugEvents;
 
   TuiStrings get strings => TuiStrings.resolve(localePreference);
 
@@ -213,6 +245,9 @@ final class _ChatTuiModel extends TeaModel {
     String? environment,
     bool clearEnvironment = false,
     TuiLocalePreference? localePreference,
+    bool? traceEnabled,
+    bool? traceGatewayEnabled,
+    Object? tracePublisher = _copyUnset,
     List<String>? knownSessionIds,
     List<_ChatLine>? messages,
     List<String>? inputHistory,
@@ -240,6 +275,8 @@ final class _ChatTuiModel extends TeaModel {
     int? slashSelectionIndex,
     bool? slashSuggestionsDismissed,
     bool? helpPanelVisible,
+    bool? debugEnabled,
+    List<AgentTraceEvent>? debugEvents,
   }) {
     return _ChatTuiModel(
       config: config ?? this.config,
@@ -250,6 +287,11 @@ final class _ChatTuiModel extends TeaModel {
       environment: clearEnvironment ? null : environment ?? this.environment,
       historyLimit: historyLimit,
       localePreference: localePreference ?? this.localePreference,
+      traceEnabled: traceEnabled ?? this.traceEnabled,
+      traceGatewayEnabled: traceGatewayEnabled ?? this.traceGatewayEnabled,
+      tracePublisher: identical(tracePublisher, _copyUnset)
+          ? this.tracePublisher
+          : tracePublisher as GatewayTracePublisher?,
       knownSessionIds: knownSessionIds ?? this.knownSessionIds,
       messages: messages ?? this.messages,
       inputHistory: inputHistory ?? this.inputHistory,
@@ -288,6 +330,8 @@ final class _ChatTuiModel extends TeaModel {
       slashSuggestionsDismissed:
           slashSuggestionsDismissed ?? this.slashSuggestionsDismissed,
       helpPanelVisible: helpPanelVisible ?? this.helpPanelVisible,
+      debugEnabled: debugEnabled ?? this.debugEnabled,
+      debugEvents: debugEvents ?? this.debugEvents,
     );
   }
 
@@ -428,6 +472,30 @@ final class _ChatTuiModel extends TeaModel {
       );
     }
 
+    if (msg is _AgentTraceMsg) {
+      final nextMessages = [
+        ...messages,
+        _ChatLine.trace(_TraceEvent(msg.event)),
+      ];
+      return (
+        copyWith(messages: _trimLines(nextMessages, historyLimit)),
+        null,
+      );
+    }
+
+    if (msg is _AgentDebugMsg) {
+      return (
+        copyWith(
+          debugEvents: _trimDebugEvents([
+            ...debugEvents,
+            msg.event,
+          ]),
+          scrollOffset: 0,
+        ),
+        null,
+      );
+    }
+
     if (msg is _HistoryLoadedMsg) {
       return (
         copyWith(
@@ -445,6 +513,28 @@ final class _ChatTuiModel extends TeaModel {
             msg.sessionId,
             ...knownSessionIds,
           }.toList(),
+          debugEvents: const [],
+          slashSelectionIndex: 0,
+          slashSuggestionsDismissed: false,
+        ),
+        null,
+      );
+    }
+
+    if (msg is _SessionResetMsg) {
+      return (
+        copyWith(
+          messages: const [],
+          inputHistory: const [],
+          inputHistoryIndex: null,
+          draftInput: '',
+          ignoredUnknownSequenceChars: 0,
+          input: input.copyWith(value: '', cursorPos: 0),
+          placeholderSuppressed: false,
+          activeAssistantText: '',
+          notice: strings.sessionReset(msg.sessionId),
+          scrollOffset: 0,
+          debugEvents: const [],
           slashSelectionIndex: 0,
           slashSuggestionsDismissed: false,
         ),
@@ -650,7 +740,10 @@ final class _ChatTuiModel extends TeaModel {
     return (
       copyWith(
         toolDetailsExpanded: next,
-        notice: strings.toolDetails(next),
+        scrollOffset: 0,
+        notice: debugEnabled
+            ? strings.debugDetails(next)
+            : strings.toolDetails(next),
       ),
       null,
     );
@@ -1011,12 +1104,43 @@ final class _ChatTuiModel extends TeaModel {
           ),
           null,
         );
+      case '/debug':
+        final next = !debugEnabled;
+        return (
+          copyWith(
+            input: input.copyWith(value: '', cursorPos: 0),
+            placeholderSuppressed: false,
+            debugEnabled: next,
+            notice: strings.debugDisplay(next),
+          ),
+          null,
+        );
+      case '/new':
+      case '/reset':
+        if (thinking) {
+          return (
+            copyWith(
+              input: input.copyWith(value: '', cursorPos: 0),
+              placeholderSuppressed: false,
+              notice: strings.assistantBusy,
+            ),
+            null,
+          );
+        }
+        return (
+          copyWith(
+            input: input.copyWith(value: '', cursorPos: 0),
+            placeholderSuppressed: false,
+          ),
+          _resetSessionCommand(),
+        );
       case '/clear':
         return (
           copyWith(
             input: input.copyWith(value: '', cursorPos: 0),
             placeholderSuppressed: false,
             messages: const [],
+            debugEvents: const [],
             activeAssistantText: '',
             notice: strings.screenCleared,
           ),
@@ -1138,6 +1262,8 @@ final class _ChatTuiModel extends TeaModel {
   ) async {
     try {
       send(_AgentWaitingMsg());
+      final traceRequestId =
+          tracePublisher == null ? null : nextLocalTraceRequestId('tui');
       final result = await agentService.runTurnStreaming(
         message: value,
         sessionId: sessionId,
@@ -1146,6 +1272,27 @@ final class _ChatTuiModel extends TeaModel {
         onDelta: (delta) => send(_AgentDeltaMsg(delta)),
         onToolCall: (call) => send(_ToolStartedMsg(call)),
         onToolResult: (result) => send(_ToolFinishedMsg(result)),
+        onTrace: (debugEnabled || traceEnabled || tracePublisher != null)
+            ? (event) {
+                if (debugEnabled) {
+                  send(_AgentDebugMsg(event));
+                }
+                if (traceEnabled) {
+                  send(_AgentTraceMsg(event));
+                }
+                if (tracePublisher != null && traceRequestId != null) {
+                  unawaited(tracePublisher!
+                      .publish(
+                        requestId: traceRequestId,
+                        sessionId: sessionId,
+                        environment: environment,
+                        source: 'tui',
+                        event: event,
+                      )
+                      .catchError((_) {}));
+                }
+              }
+            : null,
         toolPolicyOverride: _interactiveToolPolicy(),
       );
       send(_AgentCompleteMsg(result.reply));
@@ -1165,6 +1312,17 @@ final class _ChatTuiModel extends TeaModel {
       try {
         final history = await sessionStore.read(nextSession);
         return _HistoryLoadedMsg(nextSession, history);
+      } catch (error) {
+        return _AgentErrorMsg('$error');
+      }
+    };
+  }
+
+  Cmd _resetSessionCommand() {
+    return () async {
+      try {
+        await sessionStore.reset(sessionId);
+        return _SessionResetMsg(sessionId);
       } catch (error) {
         return _AgentErrorMsg('$error');
       }
@@ -1265,6 +1423,9 @@ final class _ChatTuiModel extends TeaModel {
       'tui.locale: ${tuiLocalePreferenceToConfig(localePreference)} (${strings.languageName})',
       'tool policy: ${toolPolicy.explicitDecisionCount} decision(s), $sessionPolicyCount for this session',
       'interactive permission: ask by default, ${sessionAllowedTools.length} allow(s) for this TUI session',
+      'debug: ${debugEnabled ? 'on' : 'off'}',
+      'trace: ${traceEnabled ? 'on' : 'off'}',
+      'trace gateway: ${traceGatewayEnabled || tracePublisher != null ? 'on' : 'off'}',
       'ui: thinking=${showThinking ? 'on' : 'off'}, toolDetails=${toolDetailsExpanded ? 'expanded' : 'collapsed'}',
     ].join('\n');
   }
@@ -1293,9 +1454,12 @@ final class _ChatTuiModel extends TeaModel {
 
   List<String> _buildBodyLines(int contentWidth) {
     final bodyLines = <String>[];
-    if (messages.isEmpty && activeAssistantText.isEmpty) {
+    if (messages.isEmpty && activeAssistantText.isEmpty && !debugEnabled) {
       bodyLines.add(strings.historyEmpty);
       return bodyLines;
+    }
+    if (messages.isEmpty && activeAssistantText.isEmpty) {
+      bodyLines.add(strings.historyEmpty);
     }
     for (final message in messages) {
       bodyLines.addAll(
@@ -1311,13 +1475,25 @@ final class _ChatTuiModel extends TeaModel {
       bodyLines
           .addAll(_wrapLine('assistant> $activeAssistantText', contentWidth));
     }
+    if (debugEnabled) {
+      if (bodyLines.isNotEmpty) {
+        bodyLines.add('');
+      }
+      bodyLines.addAll(_debugPanel(contentWidth));
+    }
     return bodyLines;
   }
 
   List<String> _buildHeaderLines(int contentWidth, {required bool compact}) {
     final envConfig = config.resolveEnvironment(environment);
+    final debugStatus = debugEnabled ? ' | debug=on' : '';
+    final traceStatus = traceEnabled
+        ? ' | trace=on'
+        : traceGatewayEnabled || tracePublisher != null
+            ? ' | trace=gateway'
+            : '';
     final contextLine =
-        'dartsub tui | env=${environment ?? 'default'} | session=$sessionId | lang=${_languageStatusLabel()}';
+        'dartsub tui | env=${environment ?? 'default'} | session=$sessionId | lang=${_languageStatusLabel()}$debugStatus$traceStatus';
     final modelLine =
         'model=${envConfig.provider.model} | api=${_compactBaseUrl(envConfig.provider.baseUrl)}';
     if (compact) {
@@ -1403,6 +1579,30 @@ final class _ChatTuiModel extends TeaModel {
     }
     lines.add(inputView.line);
     return lines;
+  }
+
+  List<String> _debugPanel(int contentWidth) {
+    final visibleEvents = debugEvents.length > _debugPanelEventLimit
+        ? debugEvents.sublist(debugEvents.length - _debugPanelEventLimit)
+        : debugEvents;
+    final lines = <String>[
+      if (visibleEvents.isEmpty)
+        strings.debugEmpty
+      else
+        for (final event in visibleEvents)
+          ..._renderTraceEvent(
+            _TraceEvent(event),
+            contentWidth: (contentWidth - 4).clamp(12, 196).toInt(),
+            expandDetails: toolDetailsExpanded,
+            prefix: 'debug',
+            style: false,
+          ),
+    ];
+    return _boxedLines(
+      title: strings.debugPanelTitle(expanded: toolDetailsExpanded),
+      lines: lines,
+      width: contentWidth,
+    );
   }
 
   _InputRender _footerInputView(int contentWidth, {required bool compact}) {
@@ -1724,6 +1924,10 @@ String _styleToolLine(String line) {
   return '$_toolMessageStyle$line$_ansiReset';
 }
 
+String _styleTraceLine(String line) {
+  return '$_traceMessageStyle$line$_ansiReset';
+}
+
 String _styleNoticeLine(String line) {
   return '$_noticeStyle$line$_ansiReset';
 }
@@ -1749,7 +1953,35 @@ List<String> _renderChatLine(
         expandDetails: expandToolDetails,
         strings: strings,
       );
+    case _ChatLineKind.trace:
+      return _renderTraceEvent(
+        message.trace!,
+        contentWidth: contentWidth,
+        expandDetails: expandToolDetails,
+      );
   }
+}
+
+List<String> _renderTraceEvent(
+  _TraceEvent event, {
+  required int contentWidth,
+  required bool expandDetails,
+  String prefix = 'trace',
+  bool style = true,
+}) {
+  final lines = <String>[
+    for (final line in _wrapLine(event.summary(prefix: prefix), contentWidth))
+      style ? _styleTraceLine(line) : line,
+  ];
+  if (!expandDetails) {
+    return lines;
+  }
+  final detailLines = _renderToolDetailSection(
+    _ToolDetailSection('data', event.detail()),
+    contentWidth: contentWidth,
+  );
+  lines.addAll(style ? detailLines.map(_styleTraceLine) : detailLines);
+  return lines;
 }
 
 List<String> _renderToolEvent(
@@ -2133,6 +2365,9 @@ const List<_SlashCommand> _slashCommands = [
   _SlashCommand('/help'),
   _SlashCommand('/status'),
   _SlashCommand('/history'),
+  _SlashCommand('/debug'),
+  _SlashCommand('/new'),
+  _SlashCommand('/reset'),
   _SlashCommand('/session', requiresArgument: true),
   _SlashCommand('/env', requiresArgument: true),
   _SlashCommand('/lang', requiresArgument: true),
@@ -2160,10 +2395,10 @@ final class _SlashSuggestion {
   final bool executeOnEnter;
 }
 
-enum _ChatLineKind { user, assistant, tool }
+enum _ChatLineKind { user, assistant, tool, trace }
 
 final class _ChatLine {
-  _ChatLine(this.kind, this.content, {this.tool});
+  _ChatLine(this.kind, this.content, {this.tool, this.trace});
 
   factory _ChatLine.user(String content) =>
       _ChatLine(_ChatLineKind.user, content);
@@ -2174,9 +2409,71 @@ final class _ChatLine {
   factory _ChatLine.tool(_ToolEvent tool) =>
       _ChatLine(_ChatLineKind.tool, '', tool: tool);
 
+  factory _ChatLine.trace(_TraceEvent trace) =>
+      _ChatLine(_ChatLineKind.trace, '', trace: trace);
+
   final _ChatLineKind kind;
   final String content;
   final _ToolEvent? tool;
+  final _TraceEvent? trace;
+}
+
+final class _TraceEvent {
+  _TraceEvent(this.event);
+
+  final AgentTraceEvent event;
+
+  String summary({String prefix = 'trace'}) {
+    final step = event.data['step'];
+    final stepText = step == null ? '' : ' step=$step';
+    return switch (event.type) {
+      'llm.request' => _requestSummary(stepText, prefix),
+      'llm.delta' =>
+        '$prefix> llm.delta$stepText ${_quoted(_stringData('delta'))}',
+      'llm.response' =>
+        '$prefix> llm.response$stepText ${_quoted(_stringData('content'))}',
+      'tool.call' => '$prefix> tool.call$stepText ${event.data['tool'] ?? ''}',
+      'tool.result' => _toolResultSummary(stepText, prefix),
+      _ => '$prefix> ${event.type}$stepText',
+    };
+  }
+
+  String detail() {
+    const encoder = JsonEncoder.withIndent('  ');
+    return encoder.convert(event.toJson());
+  }
+
+  String _requestSummary(String stepText, String prefix) {
+    final messages = event.data['messages'];
+    final count = messages is List ? messages.length : 0;
+    final stream = event.data['stream'] == true ? ' stream=true' : '';
+    return '$prefix> llm.request$stepText$stream messages=$count';
+  }
+
+  String _toolResultSummary(String stepText, String prefix) {
+    final result = event.data['result'];
+    if (result is Map) {
+      final tool = result['tool'] ?? '';
+      final ok = result['ok'];
+      final exit =
+          result['exitCode'] == null ? '' : ' exit=${result['exitCode']}';
+      return '$prefix> tool.result$stepText $tool ok=$ok$exit';
+    }
+    return '$prefix> tool.result$stepText';
+  }
+
+  String _stringData(String key) {
+    final value = event.data[key];
+    return value is String ? value : '';
+  }
+
+  String _quoted(String value) {
+    final oneLine = _oneLine(value);
+    if (oneLine.isEmpty) {
+      return '""';
+    }
+    return jsonEncode(oneLine);
+  }
 }
 
 enum _ToolEventStatus { running, completed, failed, denied }
@@ -2290,6 +2587,16 @@ final class _ToolFinishedMsg extends Msg {
   final ToolResult result;
 }
 
+final class _AgentTraceMsg extends Msg {
+  _AgentTraceMsg(this.event);
+  final AgentTraceEvent event;
+}
+
+final class _AgentDebugMsg extends Msg {
+  _AgentDebugMsg(this.event);
+  final AgentTraceEvent event;
+}
+
 final class _AgentCancelledMsg extends Msg {}
 
 final class _AgentErrorMsg extends Msg {
@@ -2301,6 +2608,11 @@ final class _HistoryLoadedMsg extends Msg {
   _HistoryLoadedMsg(this.sessionId, this.messages);
   final String sessionId;
   final List<ChatMessage> messages;
+}
+
+final class _SessionResetMsg extends Msg {
+  _SessionResetMsg(this.sessionId);
+  final String sessionId;
 }
 
 final class _ToolPermissionPromptMsg extends Msg {
@@ -2365,6 +2677,13 @@ List<_ChatLine> _trimLines(List<_ChatLine> lines, int limit) {
     return lines;
   }
   return lines.sublist(lines.length - limit);
+}
+
+List<AgentTraceEvent> _trimDebugEvents(List<AgentTraceEvent> events) {
+  if (events.length <= _maxDebugEvents) {
+    return events;
+  }
+  return events.sublist(events.length - _maxDebugEvents);
 }
 
 String _oneLine(String content) {

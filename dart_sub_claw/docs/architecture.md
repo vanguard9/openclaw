@@ -69,6 +69,9 @@ graph LR
 - `/help`
 - `/status`
 - `/history`
+- `/debug`
+- `/new`
+- `/reset`
 - `/session <id>`
 - `/env <name|default>`
 - `/lang <auto|zh-CN|en-US>`
@@ -77,9 +80,15 @@ graph LR
 - `/exit`
 
 TUI 直接使用 `AgentService`，因此它会走与 `dartsub agent` 相同的 provider、config 和 session 路径。
+`dartsub tui --debug` 或 `/debug` 会打开本地 debug 视图。这个视图复用 AgentService 发出的结构化 trace 事件，但把 agent/LLM 调试面板与聊天历史分开：默认显示最近 request、delta、response、tool call/result 摘要，按 Ctrl-O 展开后可以查看发给 provider 的 messages 与返回 payload。这样日常调试不需要额外启动 Gateway、SSE 客户端或把调试行混进聊天记录。
+`/new` 与 `/reset` 会为当前 TUI session 打开一个干净上下文：当前 JSONL transcript 会先移动到 `sessions/archive/`，下一次 provider 调用只会使用新历史。`/clear` 只清空屏幕上的聊天行，不会清理 session 历史。
 当 provider chunk 到达时，助手回复会流式输出到终端；流结束后，累积的回复会追加到 JSONL session。Esc 和 `/cancel` 会通过共享 cancellation token 取消活动流。被取消的回合会保留用户消息以便审计，但不会持久化部分助手回复。
 
 默认禁用鼠标跟踪和备用屏幕，以便终端选择和复制仍然可以从普通滚屏中工作。用户可以在需要 TUI 内鼠标滚轮滚动时用 `dartsub tui --mouse` 主动开启，或在需要之前那种全屏终端界面时用 `dartsub tui --alt-screen` 开启。
+
+高级 trace 模式仍保留给原始事件路由：`dartsub tui --trace` 会在聊天日志中实时显示本地 trace 事件。事件包括 `llm.request`、流式 `llm.delta`、`llm.response`、`tool.call` 和 `tool.result`。Trace 行默认显示摘要，按 Ctrl-O 会展开完整 JSON payload。`dartsub tui --trace-gateway` 则只把 TUI trace 事件发布到本地 Gateway，不在 TUI 内渲染 trace 行。
+
+如果需要更大的实时视图，可以启动 `dartsub gateway run` 并连接 `GET /trace`。这个端点使用 server-sent events 广播 Gateway `/agent`、`/agent/stream` 运行产生的 trace 事件，也接收本机进程通过 `POST /trace` 发布的事件。它适合用 `curl -N http://127.0.0.1:18987/trace | sed -n 's/^data: //p' | jq .` 在独立终端中观察。Trace 连接本身只会先发送 `hello`；要看到 LLM 事件，需要另一个客户端向同一个 Gateway 发送 `/agent` 或 `/agent/stream` 请求，或者用 `dartsub tui --trace-gateway` 启动 TUI。Trace 默认关闭或需要显式连接，因为 prompt、历史消息和 tool 输出都可能包含隐私内容。
 
 当模型请求危险工具时，TUI 会暂停该回合并请求确认。按 `y` 允许这一次工具调用；按 `n` 或 Esc 会拒绝它，并向模型返回 `permission_denied` 工具结果。
 

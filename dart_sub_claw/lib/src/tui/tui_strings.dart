@@ -61,12 +61,12 @@ final class TuiStrings {
   String get helpHint => _zh ? '/help 查看命令' : '/help for commands';
 
   String get commandsLine => _zh
-      ? '命令: /help /status /history /session <id> /env <name|default> /lang <auto|zh-CN|en-US> /clear /cancel /exit'
-      : 'commands: /help /status /history /session <id> /env <name|default> /lang <auto|zh-CN|en-US> /clear /cancel /exit';
+      ? '命令: /help /status /history /debug /new /reset /session <id> /env <name|default> /lang <auto|zh-CN|en-US> /clear /cancel /exit'
+      : 'commands: /help /status /history /debug /new /reset /session <id> /env <name|default> /lang <auto|zh-CN|en-US> /clear /cancel /exit';
 
   String get help => _zh
-      ? '命令: /help 帮助 | /status 状态 | /history 历史 | /session <id> 切换会话 | /env <name|default> 切换环境 | /lang <auto|zh-CN|en-US> 切换语言 | /clear 清屏 | /cancel 取消 | /exit 退出'
-      : 'commands: /help /status /history /session <id> /env <name|default> /lang <auto|zh-CN|en-US> /clear /cancel /exit';
+      ? '命令: /help 帮助 | /status 状态 | /history 历史 | /debug 调试视图 | /new 新上下文 | /reset 重置上下文 | /session <id> 切换会话 | /env <name|default> 切换环境 | /lang <auto|zh-CN|en-US> 切换语言 | /clear 清屏 | /cancel 取消 | /exit 退出'
+      : 'commands: /help /status /history /debug /new /reset /session <id> /env <name|default> /lang <auto|zh-CN|en-US> /clear /cancel /exit';
 
   String get slashPanelTitle => _zh ? '命令选择' : 'Command suggestions';
 
@@ -81,14 +81,14 @@ final class TuiStrings {
           '快捷键: ↑/↓ 输入历史或面板选择',
           'Tab 补全 slash 命令',
           'Esc 关闭面板或取消运行',
-          'Ctrl-O 展开 tool 详情',
+          'Ctrl-O 展开 tool/debug 详情',
           'Ctrl-T 切换 thinking 显示',
         ]
       : const [
           'keys: ↑/↓ input history or panel selection',
           'Tab completes slash commands',
           'Esc closes panels or cancels a run',
-          'Ctrl-O expands tool details',
+          'Ctrl-O expands tool/debug details',
           'Ctrl-T toggles thinking display',
         ];
 
@@ -97,6 +97,9 @@ final class TuiStrings {
       '/help' => _zh ? '显示帮助' : 'show help',
       '/status' => _zh ? '显示状态' : 'show status',
       '/history' => _zh ? '显示可见历史数量' : 'show visible history count',
+      '/debug' => _zh ? '切换调试视图' : 'toggle debug view',
+      '/new' => _zh ? '新建上下文' : 'start fresh context',
+      '/reset' => _zh ? '重置上下文' : 'reset context',
       '/session' => _zh ? '切换 session' : 'switch session',
       '/env' => _zh ? '切换 environment' : 'switch environment',
       '/lang' => _zh ? '切换 TUI 语言' : 'switch TUI language',
@@ -236,12 +239,30 @@ final class TuiStrings {
   String error(String message) => _zh ? '错误: $message' : 'error: $message';
 
   String toolDetails(bool expanded) => _zh
-      ? (expanded ? 'tool 详情已展开' : 'tool 详情已折叠')
-      : (expanded ? 'tool details expanded' : 'tool details collapsed');
+      ? (expanded ? 'tool/debug 详情已展开' : 'tool/debug 详情已折叠')
+      : (expanded
+          ? 'tool/debug details expanded'
+          : 'tool/debug details collapsed');
+
+  String debugDetails(bool expanded) => _zh
+      ? (expanded ? 'debug 详情已展开' : 'debug 详情已折叠')
+      : (expanded ? 'debug details expanded' : 'debug details collapsed');
 
   String thinkingDisplay(bool enabled) => _zh
       ? (enabled ? 'thinking 显示已开启' : 'thinking 显示已关闭')
       : (enabled ? 'thinking display on' : 'thinking display off');
+
+  String debugDisplay(bool enabled) => _zh
+      ? (enabled ? 'debug 视图已开启' : 'debug 视图已关闭')
+      : (enabled ? 'debug view on' : 'debug view off');
+
+  String debugPanelTitle({required bool expanded}) => _zh
+      ? 'Debug: agent 与 LLM${expanded ? '，Ctrl-O 折叠详情' : '，Ctrl-O 展开详情'}'
+      : 'Debug: agent and LLM${expanded ? ', Ctrl-O hides details' : ', Ctrl-O expands details'}';
+
+  String get debugEmpty => _zh
+      ? '等待下一次 agent 与 LLM 交互'
+      : 'waiting for the next agent and LLM exchange';
 
   String sessionSwitched(String sessionId) =>
       _zh ? '已切换 session 到 $sessionId' : 'session switched to $sessionId';
@@ -289,6 +310,10 @@ final class TuiStrings {
 
   String get screenCleared =>
       _zh ? '屏幕已清空；session 历史已保留' : 'screen cleared; session history kept';
+
+  String sessionReset(String sessionId) => _zh
+      ? 'session $sessionId 已重置；旧历史已归档'
+      : 'session $sessionId reset; previous history archived';
 
   String get usageSession => _zh ? '用法: /session <id>' : 'usage: /session <id>';
 
